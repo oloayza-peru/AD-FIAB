@@ -878,6 +878,167 @@ def carga_matriz(prefix: str, compacto: bool = False):
         st.rerun()
 
 
+
+# ════════════════════════════════════════════════════════════════════
+# PLAN VS REAL (avance acumulado · plan diario · hitos de control)
+# ════════════════════════════════════════════════════════════════════
+C_PLAN, C_REAL, C_G2, C_G3 = "#A9A9A9", "#D35400", "#148F77", "#1F4E79"
+C_SOMBRA = "rgba(214,204,186,0.28)"
+DIAS_ES = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre",
+            "Octubre", "Noviembre", "Diciembre"]
+
+
+def _vline(fig, x, texto=None, color="#17202A"):
+    fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper", line=dict(color=color, width=1.2, dash="dot"))
+    if texto:
+        fig.add_annotation(x=x, y=1, yref="paper", text=texto, showarrow=False, xanchor="left", yanchor="top",
+                           xshift=6, font=dict(size=12, color="#17202A"))
+
+
+def acum_real(inf_s: pd.DataFrame, d0: pd.Timestamp, t: pd.Timestamp) -> int:
+    fe = inf_s["Fecha Entrega"]
+    return int((inf_s["Estado"].eq("Entregado") & (fe > d0) & (fe <= t)).sum())
+
+
+def acum_plan(plan: pd.DataFrame, d0: pd.Timestamp, t: pd.Timestamp) -> float:
+    return float(plan.loc[(plan["Fecha"] > d0) & (plan["Fecha"] <= t), "Meta Diaria"].sum())
+
+
+def fig_avance_acumulado(inf_s, plan, K, corte, alcance_txt):
+    d0, b0 = K["d0"], K["b0"]
+    fin = plan["Fecha"].max()
+    pa = pd.concat([pd.DataFrame({"Fecha": [d0], "Plan": [0.0]}),
+                    plan.assign(Plan=plan["Meta Diaria"].cumsum())[["Fecha", "Plan"]]])
+    fe = inf_s.loc[inf_s["Estado"].eq("Entregado"), "Fecha Entrega"].dropna()
+    fechas = sorted({d0, corte} | {d for d in fe if d0 < d <= corte})
+    ra = pd.DataFrame({"Fecha": fechas, "Real": [acum_real(inf_s, d0, t) for t in fechas]})
+    p_c, r_c = acum_plan(plan, d0, corte), acum_real(inf_s, d0, corte)
+
+    fig = go.Figure()
+    if corte < fin:
+        fig.add_vrect(x0=corte, x1=fin, fillcolor=C_SOMBRA, line_width=0, layer="below")
+    fig.add_scatter(x=pa["Fecha"], y=pa["Plan"], name="Proyectado", mode="lines", line=dict(color=C_PLAN, width=3),
+                    hovertemplate="%{x|%d/%m} · programado %{y:.0f}<extra></extra>")
+    fig.add_scatter(x=ra["Fecha"], y=ra["Real"], name="Real", mode="lines", fill="tozeroy",
+                    fillcolor="rgba(211,84,0,0.12)", line=dict(color=C_REAL, width=3.5),
+                    hovertemplate="%{x|%d/%m} · real %{y}<extra></extra>")
+    fig.add_hline(y=b0, line_color="#566573", line_dash="dot", line_width=1)
+    fig.add_annotation(x=d0, y=b0, text=f"Meta: {b0} informes", showarrow=False, xanchor="left", yanchor="bottom",
+                       font=dict(size=12))
+    if K["total"] != b0:
+        fig.add_hline(y=K["total"], line_color=C_PLAN, line_dash="dot", line_width=1)
+        fig.add_annotation(x=fin, y=K["total"], text=f"Alcance actual: {K['total']}", showarrow=False,
+                           xanchor="right", yanchor="bottom", font=dict(size=11, color="#566573"))
+    _vline(fig, corte, f"Corte {corte:%d/%m}")
+    fig.add_scatter(x=[corte], y=[p_c], mode="markers", showlegend=False, hoverinfo="skip",
+                    marker=dict(size=11, color="white", line=dict(color=C_PLAN, width=2.5)))
+    fig.add_scatter(x=[corte], y=[r_c], mode="markers", showlegend=False, hoverinfo="skip",
+                    marker=dict(size=10, color=C_REAL, line=dict(color="white", width=1.5)))
+    fig.add_scatter(x=[fin], y=[pa["Plan"].iloc[-1]], mode="markers", showlegend=False, hoverinfo="skip",
+                    marker=dict(size=10, color="white", line=dict(color=C_PLAN, width=2.5)))
+    arriba = p_c >= r_c
+    fig.add_annotation(x=corte, y=p_c, text=f"Plan: {p_c:.0f}", showarrow=False, xanchor="right", xshift=-8,
+                       yshift=12 if arriba else -12, font=dict(color="#566573", size=12))
+    fig.add_annotation(x=corte, y=r_c, text=f"<b>Real: {r_c}</b>", showarrow=False, xanchor="left", xshift=8,
+                       yshift=-12 if arriba else 12, font=dict(color=C_REAL, size=12))
+    ticks = sorted({d0, fin, corte} | set(pd.date_range(d0, fin, freq="W-MON")))
+    fig.update_xaxes(tickvals=ticks, tickformat="%d/%m", showgrid=False, range=[d0 - pd.Timedelta(days=1), fin + pd.Timedelta(days=1)])
+    fig.update_yaxes(rangemode="tozero", gridcolor="rgba(0,0,0,.08)")
+    fig.update_layout(hovermode="x unified", legend=dict(x=1, xanchor="right"))
+    return estilo(fig, 400, f"Avance acumulado {alcance_txt}: proyectado vs real"), p_c, r_c
+
+
+def tarjeta(valor: str, texto: str, color: str) -> str:
+    return (f"<div style='margin:0 0 1.1rem 0'><div style='font-size:2.6rem;font-weight:700;line-height:1;"
+            f"color:{color}'>{valor}</div><div style='font-size:.85rem;opacity:.85'>{texto}</div></div>")
+
+
+def fig_plan_diario(inf, plan, alcance, corte, meta):
+    """Barras por día hábil: plan del alcance vs entregas reales (primera entrega) por grupo."""
+    dias_plan = set(plan.loc[plan["Meta Diaria"] > 0, "Fecha"])
+    reales = inf[inf["Estado"].eq("Entregado") & inf["Fecha Entrega"].notna()]
+    ref = reales["Observaciones"].str.contains("referencial")
+    det, hist = reales[~ref], reales[ref & reales["Grupo"].isin(alcance)]
+    fin = plan["Fecha"].max()
+    extra = {d for d in det["Fecha Entrega"] if plan["Fecha"].min() <= d <= min(corte, fin) and d not in dias_plan}
+    dias = sorted(dias_plan | extra)
+    idx = {d: i for i, d in enumerate(dias)}
+    pmap = plan.set_index("Fecha")["Meta Diaria"]
+
+    # Entregas sin detalle diario: se distribuyen como promedio en los días del plan del periodo
+    prom = pd.Series(0.0, index=dias)
+    for f_ref, n in hist.groupby("Fecha Entrega").size().items():
+        periodo = [d for d in dias if d in dias_plan and d <= f_ref and d not in set(det["Fecha Entrega"])]
+        periodo = [d for d in periodo if d > max([x for x in det["Fecha Entrega"] if x < f_ref], default=pd.Timestamp.min)]
+        if periodo:
+            prom[periodo] += n / len(periodo)
+
+    fig = go.Figure()
+    x = list(range(len(dias)))
+    fig.add_bar(x=x, y=[pmap.get(d, 0) for d in dias], name=f"Plan {'+'.join(alcance)}", marker_color="#C9C9C9",
+                offsetgroup="plan", customdata=[f"{d:%d/%m}" for d in dias],
+                hovertemplate="%{customdata} · plan %{y:.1f}<extra></extra>")
+    base = np.zeros(len(dias))
+    if prom.sum():
+        fig.add_bar(x=x, y=prom.values, base=base.copy(), name="Real (promedio, sin detalle diario)", offsetgroup="real",
+                    marker=dict(color="rgba(211,84,0,0.45)", pattern=dict(shape="/", fgcolor=C_REAL)),
+                    hovertemplate="promedio %{y:.1f}<extra></extra>")
+        base += prom.values
+    for g, col in [("G1", C_REAL), ("G2", C_G2), ("G3", C_G3)]:
+        v = det[det["Grupo"] == g].groupby("Fecha Entrega").size().reindex(dias, fill_value=0).values
+        v = np.where(np.array(dias) <= corte, v, 0)
+        if v.sum():
+            fig.add_bar(x=x, y=v, base=base.copy(), name=f"Real {g}", offsetgroup="real", marker_color=col,
+                        hovertemplate=f"Real {g}: %{{y}}<extra></extra>")
+            base += v
+    tot_det = det.groupby("Fecha Entrega").size().reindex(dias, fill_value=0)
+    for i, d in enumerate(dias):
+        if d <= corte and tot_det[d] > 0:
+            fig.add_annotation(x=i + 0.2, y=base[i], text=f"<b>{int(tot_det[d])}</b>", showarrow=False, yshift=9,
+                               font=dict(size=12))
+    if pd.notna(meta):
+        fig.add_hline(y=meta, line_color="#566573", line_dash="dash", line_width=1.2)
+        fig.add_scatter(x=[None], y=[None], mode="lines", name=f"Meta {meta:.0f}/día",
+                        line=dict(color="#566573", dash="dash"))
+    futuros = [i for i, d in enumerate(dias) if d > corte]
+    if futuros:
+        fig.add_vrect(x0=futuros[0] - 0.5, x1=len(dias) - 0.5, fillcolor=C_SOMBRA, line_width=0, layer="below")
+        fig.add_annotation(x=futuros[0] - 0.4, y=1, yref="paper", text=f"<b>Programado a partir del {dias[futuros[0]]:%d/%m}</b>",
+                           showarrow=False, xanchor="left", yanchor="top", font=dict(size=12))
+    ticktext = [(f"<i>{d:%d}*</i>" if d in extra else f"{d:%d}") for d in dias]
+    fig.update_xaxes(tickvals=x, ticktext=ticktext, showgrid=False, range=[-0.7, len(dias) - 0.3])
+    vistos = set()
+    for i, d in enumerate(dias):
+        if d.month not in vistos:
+            vistos.add(d.month)
+            fig.add_annotation(x=i - 0.4, y=-0.11, yref="paper", text=f"<b>{MESES_ES[d.month - 1]}</b>",
+                               showarrow=False, xanchor="left", font=dict(size=12))
+    fig.update_yaxes(title_text="Informes", gridcolor="rgba(0,0,0,.08)", rangemode="tozero")
+    fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.05)
+    fig = estilo(fig, 440, "Plan diario por día hábil vs entregas reales")
+    fig.update_layout(margin=dict(b=55))
+    return fig, bool(extra)
+
+
+def tabla_hitos(inf_s, plan, K, corte, fechas):
+    d0, b0 = K["d0"], K["b0"]
+    filas = []
+    for f in sorted(set(fechas)):
+        prog = acum_plan(plan, d0, f)
+        r = {"Fecha de corte": f"{DIAS_ES[f.weekday()]} {f:%d/%m}", "Acumulado programado": round(prog),
+             "Pendiente programado": round(b0 - prog), "% avance programado": prog / b0 * 100 if b0 else np.nan,
+             "Acumulado real": None, "Pendiente real": None, "% avance real": None, "Brecha": None, "Estado": "⏳ Por ejecutar",
+             "_corte": f == corte}
+        if f <= corte:
+            real = acum_real(inf_s, d0, f)
+            r.update({"Acumulado real": real, "Pendiente real": backlog_en(inf_s, f),
+                      "% avance real": real / b0 * 100 if b0 else np.nan, "Brecha": real - round(prog),
+                      "Estado": "✅ Cumple" if real >= round(prog) else "⚠️ Atraso"})
+        filas.append(r)
+    return pd.DataFrame(filas)
+
+
 def acciones_rapidas(prefix: str, corte):
     st.divider()
     c1, c2 = st.columns(2)
@@ -952,7 +1113,7 @@ ENT_C["Reentrega"] = ENT_C.duplicated("Código", keep="first")
 CAL = calidad(INF, ENT, PLAN)
 n_incons = sum(len(v) for k, v in CAL.items() if not k.startswith("Entregados con fecha"))
 
-tabs = st.tabs(["📊 Resumen Ejecutivo", "📈 Avance y Productividad", "🚧 Backlog y Restricciones",
+tabs = st.tabs(["📊 Resumen Ejecutivo", "🎯 Plan vs Real", "📈 Avance y Productividad", "🚧 Backlog y Restricciones",
                 "🔍 Calidad de Datos", "🗂️ Gestión de Matriz"])
 
 # ─────────────────────────── 1. RESUMEN ───────────────────────────
@@ -1038,8 +1199,69 @@ with tabs[0]:
         st.markdown(f"- {nt}")
     acciones_rapidas("t1", corte)
 
-# ─────────────────────── 2. AVANCE Y PRODUCTIVIDAD ───────────────────────
+# ─────────────────────────── 2. PLAN VS REAL ───────────────────────────
 with tabs[1]:
+    alc_txt = " + ".join(alcance)
+    if PLAN.empty:
+        sin_datos("Registre el plan de entrega (Gestión de Matriz › Plan de entrega) para ver el control plan vs real.")
+    else:
+        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700'>AVANCE ACUMULADO</div>",
+                    unsafe_allow_html=True)
+        g1, g2 = st.columns([4, 1])
+        with g1:
+            fig, p_c, r_c = fig_avance_acumulado(S, PLAN, K, corte, alc_txt)
+            mostrar(fig)
+        with g2:
+            brecha = r_c - p_c
+            cumpl = r_c / p_c * 100 if p_c else np.nan
+            st.markdown("<div style='height:3.2rem'></div>" +
+                        tarjeta(f"{p_c:.0f}", f"Acumulado programado al {corte:%d/%m}", "#7F8C8D") +
+                        tarjeta(f"{r_c}", f"Acumulado real al {corte:%d/%m}", C_REAL) +
+                        tarjeta(f"{brecha:+.0f}".replace("-", "−"),
+                                f"Brecha · {cumpl:.1f}% de cumplimiento" if pd.notna(cumpl) else "Brecha", "#1C2833"),
+                        unsafe_allow_html=True)
+        st.caption("El real acumulado cuenta informes del alcance entregados desde el inicio del plan (primera entrega). "
+                   "El tramo sin detalle diario se une en línea recta hasta la fecha de corte de las listas.")
+
+        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700;margin-top:1rem'>"
+                    "ENTREGAS DIARIAS</div>", unsafe_allow_html=True)
+        fig, hay_extra = fig_plan_diario(INF, PLAN, alcance, corte, K["meta_prom"])
+        mostrar(fig)
+        st.caption("Real por grupo = primera entrega de cada informe (sin reentregas). Las barras rayadas distribuyen en "
+                   "promedio las entregas sin detalle diario."
+                   + (" Los días marcados con * son fines de semana o feriados sin meta en los que hubo entregas." if hay_extra else ""))
+
+        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700;margin-top:1rem'>"
+                    "HITOS DE CONTROL</div>", unsafe_allow_html=True)
+        st.markdown(f"#### Puntos de control semanales · {alc_txt}")
+        fin_p = K["fin_plan"] if pd.notna(K["fin_plan"]) else PLAN["Fecha"].max()
+        viernes = [d for d in PLAN["Fecha"] if d.weekday() == 4 and d > K["d0"] and d <= fin_p]
+        opciones_h = sorted(set(PLAN["Fecha"]) | {corte})
+        defecto = sorted({corte, fin_p} | {v for v in viernes if v >= corte - pd.Timedelta(days=14)})
+        with st.expander("Configurar puntos de control"):
+            sel_h = st.multiselect("Fechas de control", opciones_h, default=[d for d in defecto if d in opciones_h],
+                                   format_func=lambda d: f"{DIAS_ES[d.weekday()]} {d:%d/%m/%Y}", key="hitos_sel")
+        th = tabla_hitos(S, PLAN, K, corte, sel_h or defecto)
+        marca = th.pop("_corte")
+        sty = (th.style
+               .apply(lambda r: ["background-color: rgba(214,204,186,.45); font-weight:600"
+                                 if marca[r.name] else "" for _ in r], axis=1)
+               .apply(lambda c: [("color:#B03A2E;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) and v < 0
+                                  else "color:#148F77;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) else "")
+                                 for v in c], subset=["Brecha"])
+               .format({"% avance programado": "{:.1f}%", "% avance real": lambda v: "—" if pd.isna(v) else f"{v:.1f}%",
+                        "Acumulado real": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+                        "Pendiente real": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+                        "Brecha": lambda v: "—" if pd.isna(v) else f"{int(v):+d}"}))
+        st.dataframe(sty, hide_index=True, use_container_width=True)
+        ini8 = PLAN[PLAN["Meta Diaria"] >= (K["meta_prom"] or 1)]["Fecha"].min() if pd.notna(K["meta_prom"]) else None
+        st.caption((f"Programa: {K['meta_prom']:.0f} informes por día hábil a partir del {ini8:%d/%m}. " if ini8 is not None and pd.notna(ini8) else "")
+                   + f"Línea base {K['b0']} informes al {K['d0']:%d/%m}. Pendiente real incluye informes incorporados "
+                   "al alcance después de la línea base. El control real se actualiza en cada corte.")
+    acciones_rapidas("tpv", corte)
+
+# ─────────────────────── 3. AVANCE Y PRODUCTIVIDAD ───────────────────────
+with tabs[2]:
     if ENT_C.empty:
         sin_datos("No hay entregas diarias registradas hasta la fecha de corte.")
     else:
@@ -1126,7 +1348,7 @@ with tabs[1]:
     acciones_rapidas("t2", corte)
 
 # ─────────────────────── 3. BACKLOG Y RESTRICCIONES ───────────────────────
-with tabs[2]:
+with tabs[3]:
     if PEND.empty:
         st.success("No hay informes pendientes. ✅")
     else:
@@ -1179,7 +1401,7 @@ with tabs[2]:
     acciones_rapidas("t3", corte)
 
 # ─────────────────────────── 4. CALIDAD DE DATOS ───────────────────────────
-with tabs[3]:
+with tabs[4]:
     st.markdown("La confiabilidad del KPI depende de la conciliación entre las listas por grupo, el registro diario y "
                 "el plan. Estas verificaciones se recalculan con cada actualización.")
     cols = st.columns(3)
@@ -1197,7 +1419,7 @@ with tabs[3]:
             st.markdown(f"- {nt}")
 
 # ─────────────────────────── 5. GESTIÓN DE MATRIZ ───────────────────────────
-with tabs[4]:
+with tabs[5]:
     s1, s2, s3, s4, s5, s6, s7 = st.tabs(["📬 Registrar entregas", "➕ Nuevo informe", "✏️ Maestro de informes",
                                           "📅 Registro diario", "🗓️ Plan de entrega", "⬆️ Subir matriz", "⬇️ Descargar"])
     with s1:
