@@ -60,6 +60,10 @@ COLOR_GRUPO = {"G1": AZUL, "G2": AZUL_CL, "G3": NARANJA, "Reentrega": GRIS}
 
 st.markdown("""
 <style>
+/* Panel principal en blanco, independiente del tema del navegador */
+.stApp, [data-testid="stAppViewContainer"], [data-testid="stHeader"], [data-testid="stMain"] {background-color:#FFFFFF !important;}
+[data-testid="stAppViewContainer"] {color:#1C2833;}
+[data-testid="stSidebar"] {background-color:#F4F6F8 !important;}
 [data-testid="stMetric"]{background:rgba(31,78,121,.06);border:1px solid rgba(31,78,121,.18);
   border-radius:10px;padding:10px 14px;}
 [data-testid="stMetricLabel"] p{font-weight:600;}
@@ -713,29 +717,11 @@ def kpis(inf, ent, plan, alcance, corte, n_vel):
     return r
 
 
-def calidad(inf, ent, plan) -> dict[str, pd.DataFrame]:
-    gm = inf.set_index("Código")["Grupo"]
-    out = {}
-    dup = ent[ent.duplicated("Código", keep=False)].sort_values(["Código", "Fecha"])
-    out["Reentregas (mismo informe registrado más de una vez)"] = dup
-    e = ent.assign(**{"Grupo en maestro": ent["Código"].map(gm)})
-    out["Grupo del registro diario ≠ grupo en listas"] = e[e["Grupo"].ne(e["Grupo en maestro"]) & e["Grupo"].ne("")]
-    out["Incorporados desde el registro diario (no figuraban en listas)"] = inf[inf["Observaciones"].str.startswith("Incorporado")]
-    out["Entregados con fecha referencial (sin detalle diario)"] = inf[inf["Observaciones"].str.contains("referencial")]
-    out["Pendientes G3 sin restricción registrada"] = inf[(inf["Grupo"] == "G3") & (inf["Estado"] == "Pendiente") & inf["Restricción"].eq("")]
-    if len(plan):
-        p = plan.copy()
-        p["Día"] = p["Fecha"].dt.day_name(locale=None)
-        p["Hábil"] = p["Fecha"].map(es_habil)
-        out["Plan con meta en feriado / fin de semana"] = p[(p["Meta Diaria"] > 0) & ~p["Hábil"]][["Fecha", "Meta Diaria"]]
-    return out
-
-
 # ════════════════════════════════════════════════════════════════════
 # GRÁFICOS
 # ════════════════════════════════════════════════════════════════════
 def estilo(fig: go.Figure, h: int = 380, titulo: str | None = None) -> go.Figure:
-    fig.update_layout(template="plotly_white", height=h, margin=dict(l=10, r=10, t=60 if titulo else 40, b=10),
+    fig.update_layout(template="plotly_white", paper_bgcolor="#FFFFFF", plot_bgcolor="#FFFFFF", height=h, margin=dict(l=10, r=10, t=60 if titulo else 40, b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
                       font=dict(family="Segoe UI, Arial, sans-serif", size=12),
                       title=dict(text=titulo, font=dict(size=15)) if titulo else None)
@@ -743,7 +729,7 @@ def estilo(fig: go.Figure, h: int = 380, titulo: str | None = None) -> go.Figure
 
 
 def mostrar(fig):
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, use_container_width=True, theme=None, config={"displaylogo": False})
 
 
 def sin_datos(msg="No hay datos suficientes para este gráfico."):
@@ -1116,10 +1102,8 @@ RESTR = PEND[(PEND["Grupo"] == "G3") | PEND["Restricción"].ne("")]
 ENT_C = ENT[ENT["Fecha"] <= corte].copy()
 ENT_C["Grupo maestro"] = ENT_C["Código"].map(INF.set_index("Código")["Grupo"])
 ENT_C["Reentrega"] = ENT_C.duplicated("Código", keep="first")
-CAL = calidad(INF, ENT, PLAN)
-n_incons = sum(len(v) for k, v in CAL.items() if not k.startswith("Entregados con fecha"))
 
-tabs = st.tabs(["📑 Indicadores de Informes", "🔍 Calidad de Datos", "🗂️ Gestión de Matriz"])
+tabs = st.tabs(["📑 Indicadores de Informes", "🗂️ Gestión de Matriz"])
 
 
 def seccion(etiqueta: str, titulo: str):
@@ -1308,43 +1292,6 @@ with tabs[0]:
                               if info["no_hab"] else "")
                            + " Con pocos días los límites son orientativos.")
 
-    seccion("Lectura gerencial", "Conclusiones del periodo")
-    notas = []
-    if pd.notna(K["spi"]):
-        est = "por encima" if K["spi"] >= 100 else "por debajo"
-        notas.append(f"El avance real acumulado del alcance {alc_txt} ({K['real_acum']} informes desde el "
-                     f"{K['d0'] + pd.Timedelta(days=1):%d/%m}) está **{est} del plan** ({K['plan_acum']:.0f}): "
-                     f"cumplimiento de **{K['spi']:.0f}%**.")
-    if K.get("crec_alcance"):
-        pl_hoy = serie_plan(PLAN, K["b0"])
-        pl_hoy = pl_hoy[pl_hoy["Fecha"] <= corte]["Plan"].iloc[-1] if len(pl_hoy) else np.nan
-        notas.append(f"El alcance creció en **{K['crec_alcance']}** informes desde la línea base del {K['d0']:%d/%m} "
-                     f"({K['b0']} → {K['total']}); aun entregando más de lo planificado, el backlog real "
-                     f"(**{K['pendientes']}**) se compara con **{pl_hoy:.0f}** del plan a la fecha.")
-    if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
-        notas.append(f"Con **{K['vel']:.1f} informes/día** (meta {K['meta_prom']:.0f}), los **{K['pendientes']} pendientes** "
-                     f"se cerrarían hacia el **{K['cierre']:%d/%m/%Y}** frente al **{K['fin_plan']:%d/%m/%Y}** del plan"
-                     + (" — se requiere reforzar capacidad o priorizar." if K["cierre"] > K["fin_plan"] else "."))
-        if K["cierre"] > K["fin_plan"] and K["pendientes"]:
-            dias_rest = max(1, int(np.busday_count(np.datetime64(corte.date()), np.datetime64(K["fin_plan"].date()), holidays=HOL)))
-            notas.append(f"Para cumplir la fecha del plan se necesitan **{K['pendientes'] / dias_rest:.1f} informes/día hábil**.")
-    ven = ENT_C[(ENT_C["Fecha"] >= K["vel_ini"]) & ENT_C["Código"].isin(S["Código"]) & ~ENT_C["Reentrega"]]
-    fin_sem = ven[~ven["Fecha"].map(es_habil)]
-    if len(fin_sem):
-        solo_hab = (len(ven) - len(fin_sem)) / n_vel
-        notas.append(f"De las entregas del alcance en la ventana, **{len(fin_sem)}** se hicieron en fin de semana o feriado. "
-                     f"Sin ese esfuerzo adicional la productividad sería de **{solo_hab:.1f} informes/día hábil**"
-                     + (", por debajo de la meta: el cumplimiento actual depende de horas extra."
-                        if pd.notna(K["meta_prom"]) and solo_hab < K["meta_prom"] else "."))
-    if len(RESTR):
-        top = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts()
-        notas.append(f"**{len(RESTR)}** pendientes dependen de gestiones externas; la principal es **{top.index[0]}** "
-                     f"({top.iloc[0]} informes, {top.iloc[0] / len(RESTR) * 100:.0f}%).")
-    if n_incons:
-        notas.append(f"Se detectaron **{n_incons}** registros por conciliar (ver pestaña *Calidad de Datos*).")
-    for nt in notas:
-        st.markdown(f"- {nt}")
-
     with st.expander(f"🚧 Backlog pendiente y restricciones ({len(PEND)} pendientes · {len(RESTR)} con restricción)"):
         if PEND.empty:
             st.success("No hay informes pendientes. ✅")
@@ -1378,26 +1325,8 @@ with tabs[0]:
 
     acciones_rapidas("ti", corte)
 
-# ─────────────────────────── 4. CALIDAD DE DATOS ───────────────────────────
+# ─────────────────────────── 2. GESTIÓN DE MATRIZ ───────────────────────────
 with tabs[1]:
-    st.markdown("La confiabilidad del KPI depende de la conciliación entre las listas por grupo, el registro diario y "
-                "el plan. Estas verificaciones se recalculan con cada actualización.")
-    cols = st.columns(3)
-    for i, (k, v) in enumerate(CAL.items()):
-        cols[i % 3].metric(k, len(v))
-    for k, v in CAL.items():
-        if len(v):
-            with st.expander(f"{k} ({len(v)})"):
-                st.dataframe(v, hide_index=True, use_container_width=True,
-                             column_config={c: st.column_config.DateColumn(format="DD/MM/YYYY")
-                                            for c in ["Fecha", "Fecha Ingreso", "Fecha Entrega"] if c in v.columns})
-    if st.session_state.notas:
-        st.markdown("##### 📝 Notas de conciliación de la última importación")
-        for nt in st.session_state.notas:
-            st.markdown(f"- {nt}")
-
-# ─────────────────────────── 5. GESTIÓN DE MATRIZ ───────────────────────────
-with tabs[2]:
     s1, s2, s3, s4, s5, s6, s7 = st.tabs(["📬 Registrar entregas", "➕ Nuevo informe", "✏️ Maestro de informes",
                                           "📅 Registro diario", "🗓️ Plan de entrega", "⬆️ Subir matriz", "⬇️ Descargar"])
     with s1:
