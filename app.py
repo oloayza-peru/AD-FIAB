@@ -31,7 +31,7 @@ from plotly.subplots import make_subplots
 # ════════════════════════════════════════════════════════════════════
 # CONFIGURACIÓN
 # ════════════════════════════════════════════════════════════════════
-st.set_page_config(page_title="KPI Entrega de Informes | ADEMINSAC", page_icon="📊",
+st.set_page_config(page_title="Indicadores Contrato ADEMINSAC - Fiabilidad REPSOL", page_icon="📊",
                    layout="wide", initial_sidebar_state="expanded")
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -63,8 +63,10 @@ st.markdown("""
 [data-testid="stMetric"]{background:rgba(31,78,121,.06);border:1px solid rgba(31,78,121,.18);
   border-radius:10px;padding:10px 14px;}
 [data-testid="stMetricLabel"] p{font-weight:600;}
-.hdr{padding:.4rem 0 .2rem 0;border-bottom:3px solid #1F4E79;margin-bottom:.8rem;}
-.hdr h1{font-size:1.65rem;margin:0;color:#1F4E79;} .hdr p{margin:.1rem 0 0 0;opacity:.75;}
+.hdr{padding:.4rem 0 .3rem 0;border-bottom:3px solid #D35400;margin-bottom:.8rem;}
+.hdr h1{font-size:1.7rem;margin:0;}
+.sec{font-size:.78rem;letter-spacing:.09em;color:#D35400;font-weight:700;margin-top:1.6rem;}
+.sect{font-size:1.45rem;font-weight:700;margin:0 0 .2rem 0;} .hdr p{margin:.1rem 0 0 0;opacity:.75;}
 </style>""", unsafe_allow_html=True)
 
 
@@ -733,10 +735,10 @@ def calidad(inf, ent, plan) -> dict[str, pd.DataFrame]:
 # GRÁFICOS
 # ════════════════════════════════════════════════════════════════════
 def estilo(fig: go.Figure, h: int = 380, titulo: str | None = None) -> go.Figure:
-    fig.update_layout(template="plotly_white", height=h, margin=dict(l=10, r=10, t=60 if titulo else 25, b=10),
+    fig.update_layout(template="plotly_white", height=h, margin=dict(l=10, r=10, t=60 if titulo else 40, b=10),
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
                       font=dict(family="Segoe UI, Arial, sans-serif", size=12),
-                      title=dict(text=titulo, font=dict(size=15, color=AZUL)) if titulo else None)
+                      title=dict(text=titulo, font=dict(size=15)) if titulo else None)
     return fig
 
 
@@ -882,18 +884,20 @@ def carga_matriz(prefix: str, compacto: bool = False):
 # ════════════════════════════════════════════════════════════════════
 # PLAN VS REAL (avance acumulado · plan diario · hitos de control)
 # ════════════════════════════════════════════════════════════════════
-C_PLAN, C_REAL, C_G2, C_G3 = "#A9A9A9", "#D35400", "#148F77", "#1F4E79"
-C_SOMBRA = "rgba(214,204,186,0.28)"
+C_PLAN, C_REAL, C_G2, C_G3 = "#A9A9A9", "#D35400", "#17A589", "#5DADE2"
+C_SOMBRA = "rgba(150,150,150,0.13)"
+C_NEUTRO = "#8C959D"
+COLOR_TAB = {"G1": "#D35400", "G2": "#17A589", "G3": "#5DADE2"}
 DIAS_ES = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre",
             "Octubre", "Noviembre", "Diciembre"]
 
 
-def _vline(fig, x, texto=None, color="#17202A"):
+def _vline(fig, x, texto=None, color="#8C959D"):
     fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper", line=dict(color=color, width=1.2, dash="dot"))
     if texto:
         fig.add_annotation(x=x, y=1, yref="paper", text=texto, showarrow=False, xanchor="left", yanchor="top",
-                           xshift=6, font=dict(size=12, color="#17202A"))
+                           xshift=6, font=dict(size=12))
 
 
 def acum_real(inf_s: pd.DataFrame, d0: pd.Timestamp, t: pd.Timestamp) -> int:
@@ -923,13 +927,13 @@ def fig_avance_acumulado(inf_s, plan, K, corte, alcance_txt):
     fig.add_scatter(x=ra["Fecha"], y=ra["Real"], name="Real", mode="lines", fill="tozeroy",
                     fillcolor="rgba(211,84,0,0.12)", line=dict(color=C_REAL, width=3.5),
                     hovertemplate="%{x|%d/%m} · real %{y}<extra></extra>")
-    fig.add_hline(y=b0, line_color="#566573", line_dash="dot", line_width=1)
+    fig.add_hline(y=b0, line_color=C_NEUTRO, line_dash="dot", line_width=1)
     fig.add_annotation(x=d0, y=b0, text=f"Meta: {b0} informes", showarrow=False, xanchor="left", yanchor="bottom",
                        font=dict(size=12))
     if K["total"] != b0:
         fig.add_hline(y=K["total"], line_color=C_PLAN, line_dash="dot", line_width=1)
         fig.add_annotation(x=fin, y=K["total"], text=f"Alcance actual: {K['total']}", showarrow=False,
-                           xanchor="right", yanchor="bottom", font=dict(size=11, color="#566573"))
+                           xanchor="right", yanchor="bottom", font=dict(size=11, color=C_NEUTRO))
     _vline(fig, corte, f"Corte {corte:%d/%m}")
     fig.add_scatter(x=[corte], y=[p_c], mode="markers", showlegend=False, hoverinfo="skip",
                     marker=dict(size=11, color="white", line=dict(color=C_PLAN, width=2.5)))
@@ -939,14 +943,16 @@ def fig_avance_acumulado(inf_s, plan, K, corte, alcance_txt):
                     marker=dict(size=10, color="white", line=dict(color=C_PLAN, width=2.5)))
     arriba = p_c >= r_c
     fig.add_annotation(x=corte, y=p_c, text=f"Plan: {p_c:.0f}", showarrow=False, xanchor="right", xshift=-8,
-                       yshift=12 if arriba else -12, font=dict(color="#566573", size=12))
+                       yshift=12 if arriba else -12, font=dict(color=C_NEUTRO, size=12))
     fig.add_annotation(x=corte, y=r_c, text=f"<b>Real: {r_c}</b>", showarrow=False, xanchor="left", xshift=8,
                        yshift=-12 if arriba else 12, font=dict(color=C_REAL, size=12))
     ticks = sorted({d0, fin, corte} | set(pd.date_range(d0, fin, freq="W-MON")))
     fig.update_xaxes(tickvals=ticks, tickformat="%d/%m", showgrid=False, range=[d0 - pd.Timedelta(days=1), fin + pd.Timedelta(days=1)])
     fig.update_yaxes(rangemode="tozero", gridcolor="rgba(0,0,0,.08)")
-    fig.update_layout(hovermode="x unified", legend=dict(x=1, xanchor="right"))
-    return estilo(fig, 400, f"Avance acumulado {alcance_txt}: proyectado vs real"), p_c, r_c
+    fig.update_layout(hovermode="x unified")
+    fig = estilo(fig, 410)
+    fig.update_layout(legend=dict(orientation="h", x=1, xanchor="right", y=1.02, yanchor="bottom"))
+    return fig, p_c, r_c
 
 
 def tarjeta(valor: str, texto: str, color: str) -> str:
@@ -998,9 +1004,9 @@ def fig_plan_diario(inf, plan, alcance, corte, meta):
             fig.add_annotation(x=i + 0.2, y=base[i], text=f"<b>{int(tot_det[d])}</b>", showarrow=False, yshift=9,
                                font=dict(size=12))
     if pd.notna(meta):
-        fig.add_hline(y=meta, line_color="#566573", line_dash="dash", line_width=1.2)
+        fig.add_hline(y=meta, line_color=C_NEUTRO, line_dash="dash", line_width=1.2)
         fig.add_scatter(x=[None], y=[None], mode="lines", name=f"Meta {meta:.0f}/día",
-                        line=dict(color="#566573", dash="dash"))
+                        line=dict(color=C_NEUTRO, dash="dash"))
     futuros = [i for i, d in enumerate(dias) if d > corte]
     if futuros:
         fig.add_vrect(x0=futuros[0] - 0.5, x1=len(dias) - 0.5, fillcolor=C_SOMBRA, line_width=0, layer="below")
@@ -1016,8 +1022,8 @@ def fig_plan_diario(inf, plan, alcance, corte, meta):
                                showarrow=False, xanchor="left", font=dict(size=12))
     fig.update_yaxes(title_text="Informes", gridcolor="rgba(0,0,0,.08)", rangemode="tozero")
     fig.update_layout(barmode="group", bargap=0.25, bargroupgap=0.05)
-    fig = estilo(fig, 440, "Plan diario por día hábil vs entregas reales")
-    fig.update_layout(margin=dict(b=55))
+    fig = estilo(fig, 440)
+    fig.update_layout(margin=dict(b=55), legend=dict(orientation="h", x=1, xanchor="right", y=1.02, yanchor="bottom"))
     return fig, bool(extra)
 
 
@@ -1091,8 +1097,8 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════════
 # ENCABEZADO
 # ════════════════════════════════════════════════════════════════════
-st.markdown(f"""<div class="hdr"><h1>📊 KPI · Entrega de Informes</h1>
-<p>ADEMINSAC · Contrato N° 3700002135 · Refinería La Pampilla · Corte al {corte:%d/%m/%Y} ·
+st.markdown(f"""<div class="hdr"><h1>📊 Indicadores Contrato ADEMINSAC - Fiabilidad REPSOL</h1>
+<p>Contrato N° 3700002135 · Refinería La Pampilla · Corte al {corte:%d/%m/%Y} ·
 alcance del plan {' + '.join(alcance)}</p></div>""", unsafe_allow_html=True)
 if "flash" in st.session_state:
     st.success(st.session_state.pop("flash"))
@@ -1113,100 +1119,117 @@ ENT_C["Reentrega"] = ENT_C.duplicated("Código", keep="first")
 CAL = calidad(INF, ENT, PLAN)
 n_incons = sum(len(v) for k, v in CAL.items() if not k.startswith("Entregados con fecha"))
 
-tabs = st.tabs(["📊 Resumen Ejecutivo", "🎯 Plan vs Real", "📈 Avance y Productividad", "🚧 Backlog y Restricciones",
-                "🔍 Calidad de Datos", "🗂️ Gestión de Matriz"])
+tabs = st.tabs(["📑 Indicadores de Informes", "🔍 Calidad de Datos", "🗂️ Gestión de Matriz"])
 
-# ─────────────────────────── 1. RESUMEN ───────────────────────────
+
+def seccion(etiqueta: str, titulo: str):
+    st.markdown(f"<div class='sec'>{etiqueta.upper()}</div><div class='sect'>{titulo}</div>", unsafe_allow_html=True)
+
+
+def fig_curva_s(inf, plan, K, corte, alcance):
+    """Entregas acumuladas por grupo (áreas apiladas) frente al plan acumulado del alcance."""
+    d0 = K["d0"]
+    fin = plan["Fecha"].max()
+    ent_ok = inf["Estado"].eq("Entregado") & (inf["Fecha Entrega"] > d0) & (inf["Fecha Entrega"] <= corte)
+    dias = sorted({d0, corte} | set(inf.loc[ent_ok, "Fecha Entrega"]))      # eventos: tramos sin detalle en línea recta
+    fig = go.Figure()
+    for g in GRUPOS:
+        fe = inf.loc[(inf["Grupo"] == g) & inf["Estado"].eq("Entregado"), "Fecha Entrega"]
+        if not ((fe > d0) & (fe <= corte)).any():
+            continue
+        y = [int(((fe > d0) & (fe <= t)).sum()) for t in dias]
+        fig.add_scatter(x=dias, y=y, name=f"Real {g}", mode="lines", stackgroup="real",
+                        line=dict(width=1.5, color=COLOR_TAB[g]), hovertemplate=f"Real {g}: %{{y}}<extra></extra>")
+    pa = pd.concat([pd.DataFrame({"Fecha": [d0], "Plan": [0.0]}),
+                    plan.assign(Plan=plan["Meta Diaria"].cumsum())[["Fecha", "Plan"]]])
+    fig.add_scatter(x=pa["Fecha"], y=pa["Plan"], name=f"Plan acumulado {'+'.join(alcance)}", mode="lines",
+                    line=dict(color=C_PLAN, dash="dash", width=2.5), hovertemplate="Plan: %{y:.0f}<extra></extra>")
+    fe_all = inf["Fecha Entrega"]
+    tot = int(((fe_all > d0) & (fe_all <= corte) & inf["Estado"].eq("Entregado")).sum())
+    fig.add_annotation(x=corte, y=tot, text=f"<b>{tot}</b>", showarrow=False, xanchor="left", xshift=6)
+    fig.add_hline(y=K["b0"], line_color=C_NEUTRO, line_dash="dot", line_width=1)
+    fig.add_annotation(x=d0, y=K["b0"], text=f"Línea base {'+'.join(alcance)}: {K['b0']}", showarrow=False,
+                       xanchor="left", yanchor="bottom", font=dict(size=11, color=C_NEUTRO))
+    _vline(fig, corte)
+    fig.update_xaxes(tickformat="%d/%m", range=[d0 - pd.Timedelta(days=1), fin + pd.Timedelta(days=1)], showgrid=False)
+    fig.update_yaxes(title_text="Informes entregados", rangemode="tozero", gridcolor="rgba(128,128,128,.15)")
+    fig.update_layout(hovermode="x unified")
+    return estilo(fig, 400)
+
+
+def fig_tipo(ent_c):
+    t = ent_c.groupby(["Tipo (GP_AD)", "Grupo maestro"]).size().reset_index(name="N")
+    t["Tipo (GP_AD)"] = t["Tipo (GP_AD)"].replace("", "Sin tipo").map(lambda c: TIPOS_GPAD.get(c, c))
+    tot = t.groupby("Tipo (GP_AD)")["N"].sum().sort_values()
+    fig = px.bar(t, x="N", y="Tipo (GP_AD)", color="Grupo maestro", orientation="h", text="N",
+                 color_discrete_map=COLOR_TAB, labels={"Grupo maestro": "Grupo"},
+                 category_orders={"Tipo (GP_AD)": tot.index.tolist()[::-1], "Grupo maestro": GRUPOS})
+    for tipo, n in tot.items():
+        fig.add_annotation(x=n, y=tipo, text=f"<b>{n}</b>", showarrow=False, xanchor="left", xshift=6)
+    fig.update_traces(textposition="inside", insidetextanchor="middle")
+    fig.update_layout(barmode="stack", xaxis_title="Entregas registradas", yaxis_title=None)
+    fig.update_xaxes(range=[0, tot.max() * 1.12], gridcolor="rgba(128,128,128,.15)")
+    return estilo(fig, 400)
+
+
+def fig_imr(ent_c, corte, meta):
+    diario = ent_c.groupby("Fecha").size().reindex(pd.date_range(ent_c["Fecha"].min(), corte), fill_value=0)
+    habil = diario[[es_habil(x) for x in diario.index]]
+    no_hab = diario[[not es_habil(x) for x in diario.index]]
+    no_hab = no_hab[no_hab > 0]
+    if len(habil) < 5:
+        return None, None
+    x = habil.to_numpy(dtype=float)
+    media, mr = x.mean(), np.abs(np.diff(x)).mean()
+    lsc, lic = media + 2.66 * mr, max(0.0, media - 2.66 * mr)
+    etiquetas = [f"{DIAS_ES[d.weekday()]} {d:%d/%m}" for d in habil.index]
+    pos = list(range(len(x)))
+    fig = go.Figure()
+    fig.add_hrect(y0=lic, y1=lsc, fillcolor="rgba(128,128,128,0.07)", line_width=0, layer="below")
+    fig.add_scatter(x=pos, y=x, mode="lines+markers+text", text=x.astype(int), textposition="top center",
+                    name="Entregas por día hábil", line=dict(color=COLOR_TAB["G3"], width=2.5),
+                    marker=dict(size=9, color=COLOR_TAB["G3"]),
+                    customdata=etiquetas, hovertemplate="%{customdata}: %{y} entregas<extra></extra>")
+    fuera = (x > lsc) | (x < lic)
+    if fuera.any():
+        fig.add_scatter(x=np.array(pos)[fuera], y=x[fuera], mode="markers", name="Fuera de control",
+                        marker=dict(color=ROJO, size=14, symbol="diamond"))
+    for y, n, col, dsh, posi in [(lsc, "LSC", C_REAL, "dash", "top left"), (media, "Media", C_NEUTRO, "solid", "top left"),
+                                 (lic, "LIC", C_REAL, "dash", "bottom left")]:
+        fig.add_hline(y=y, line_color=col, line_dash=dsh, line_width=1.3,
+                      annotation_text=f"{n} {y:.1f}", annotation_position=posi, annotation_font_size=11)
+    if pd.notna(meta):
+        fig.add_hline(y=meta, line_color=COLOR_TAB["G2"], line_dash="dot", line_width=1.8,
+                      annotation_text=f"Meta {meta:.0f}", annotation_position="top right", annotation_font_size=11)
+    fig.update_xaxes(tickvals=pos, ticktext=etiquetas, showgrid=False, zeroline=False, range=[-0.5, len(pos) - 0.5])
+    fig.update_yaxes(title_text="Informes / día", gridcolor="rgba(128,128,128,.15)",
+                     range=[0, max(lsc, x.max(), meta if pd.notna(meta) else 0) * 1.15])
+    return estilo(fig, 400), {"media": media, "lsc": lsc, "lic": lic, "n": len(x), "fuera": int(fuera.sum()),
+                              "no_hab": int(no_hab.sum()), "dias_no_hab": len(no_hab)}
+
+
+# ───────────────────── 1. INDICADORES DE INFORMES ─────────────────────
 with tabs[0]:
-    b_total = backlog_en(INF, corte)
-    b_prev = backlog_en(INF, corte - pd.Timedelta(days=7))
+    alc_txt = " + ".join(alcance)
     c = st.columns(4)
-    c[0].metric("Backlog pendiente (todos los grupos)", f"{b_total}", f"{b_total - b_prev:+d} vs hace 7 días",
-                delta_color="inverse")
-    c[1].metric(f"Avance {' + '.join(alcance)}", f"{K['avance']:.1f}%" if pd.notna(K["avance"]) else "—",
+    c[0].metric(f"Avance {alc_txt}", f"{K['avance']:.1f}%" if pd.notna(K["avance"]) else "—",
                 f"{K['entregados']} de {K['total']} entregados", delta_color="off")
-    c[2].metric("Cumplimiento del plan (real / plan acumulado)", f"{K['spi']:.0f}%" if pd.notna(K["spi"]) else "—",
+    c[1].metric("Cumplimiento del plan", f"{K['spi']:.0f}%" if pd.notna(K["spi"]) else "—",
                 f"{K['real_acum'] - K['plan_acum']:+.0f} informes vs plan" if pd.notna(K["spi"]) else None)
-    c[3].metric(f"Productividad (últimos {n_vel} días háb.)", f"{K['vel']:.1f} inf/día",
+    c[2].metric(f"Productividad (últimos {n_vel} días háb.)", f"{K['vel']:.1f} inf/día",
                 f"{K['vel'] - K['meta_prom']:+.1f} vs meta {K['meta_prom']:.0f}" if pd.notna(K["meta_prom"]) else None)
-    c = st.columns(4)
     if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
         desf = int(np.busday_count(np.datetime64(K["fin_plan"].date()), np.datetime64(K["cierre"].date()), holidays=HOL))
-        c[0].metric("Cierre estimado al ritmo actual", f"{K['cierre']:%d/%m/%Y}",
+        c[3].metric("Cierre estimado al ritmo actual", f"{K['cierre']:%d/%m/%Y}",
                     f"{desf:+d} días háb. vs plan ({K['fin_plan']:%d/%m})", delta_color="inverse")
     else:
-        c[0].metric("Cierre estimado al ritmo actual", "—", "sin entregas recientes", delta_color="off")
-    c[1].metric("Pendientes con restricción externa", f"{len(RESTR)}",
-                f"{len(RESTR) / len(PEND) * 100:.0f}% del backlog" if len(PEND) else None, delta_color="off")
-    c[2].metric("Entregas registradas (detalle diario)", f"{len(ENT_C)}",
-                f"{int(ENT_C['Reentrega'].sum())} reentregas", delta_color="off")
-    c[3].metric("Antigüedad máxima de un pendiente", f"{int(PEND['Antigüedad (días háb.)'].max())} días háb."
-                if PEND["Antigüedad (días háb.)"].notna().any() else "—")
+        c[3].metric("Cierre estimado al ritmo actual", "—", "sin entregas recientes", delta_color="off")
 
-    g1, g2 = st.columns([2, 1])
-    with g1:
-        mostrar(fig_burndown(S, PLAN, K, corte, f"Curva de cierre del backlog {' + '.join(alcance)}: plan vs real"))
-        st.caption("Tramo sin detalle diario (entre listas de corte) unido en línea recta. La proyección naranja "
-                   "extiende la productividad de la ventana seleccionada.")
-    with g2:
-        g = INF.groupby(["Grupo", "Estado"]).size().unstack(fill_value=0).reindex(columns=["Entregado", "Pendiente"], fill_value=0)
-        g["Total"] = g.sum(axis=1)
-        fig = go.Figure()
-        fig.add_bar(x=g.index, y=g["Entregado"], name="Entregado", marker_color=AZUL, text=g["Entregado"])
-        fig.add_bar(x=g.index, y=g["Pendiente"], name="Pendiente", marker_color=NARANJA, text=g["Pendiente"])
-        for grp, r in g.iterrows():
-            fig.add_annotation(x=grp, y=r["Total"], text=f"<b>{r['Entregado'] / r['Total'] * 100:.0f}%</b>",
-                               showarrow=False, yshift=12)
-        fig.update_layout(barmode="stack", yaxis_title="N° informes")
-        mostrar(estilo(fig, 400, "Estado por grupo (% avance)"))
-
-    st.markdown("##### 🧠 Lectura gerencial")
-    notas = []
-    if pd.notna(K["spi"]):
-        est = "por encima" if K["spi"] >= 100 else "por debajo"
-        notas.append(f"El avance real acumulado del alcance {' + '.join(alcance)} ({K['real_acum']} informes desde el "
-                     f"{K['d0'] + pd.Timedelta(days=1):%d/%m}) está **{est} del plan** ({K['plan_acum']:.0f}): "
-                     f"cumplimiento de **{K['spi']:.0f}%**.")
-    if K.get("crec_alcance"):
-        pl_hoy = serie_plan(PLAN, K["b0"])
-        pl_hoy = pl_hoy[pl_hoy["Fecha"] <= corte]["Plan"].iloc[-1] if len(pl_hoy) else np.nan
-        notas.append(f"El alcance creció en **{K['crec_alcance']}** informes desde la línea base del "
-                     f"{K['d0']:%d/%m} ({K['b0']} → {K['total']}); por ello, aun entregando más de lo planificado, "
-                     f"el backlog real (**{K['pendientes']}**) se compara con **{pl_hoy:.0f}** del plan a la fecha.")
-    if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
-        notas.append(f"Con **{K['vel']:.1f} informes/día** (meta {K['meta_prom']:.0f}), los **{K['pendientes']} pendientes** "
-                     f"se cerrarían hacia el **{K['cierre']:%d/%m/%Y}** frente al **{K['fin_plan']:%d/%m/%Y}** del plan"
-                     + (" — se requiere reforzar capacidad o priorizar." if K["cierre"] > K["fin_plan"] else "."))
-        if K["cierre"] > K["fin_plan"] and K["pendientes"]:
-            dias_rest = max(1, int(np.busday_count(np.datetime64(corte.date()), np.datetime64(K["fin_plan"].date()), holidays=HOL)))
-            notas.append(f"Para cumplir la fecha del plan se necesitan **{K['pendientes'] / dias_rest:.1f} informes/día hábil**.")
-    if len(RESTR):
-        top = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts()
-        notas.append(f"**{len(RESTR)}** pendientes dependen de gestiones externas; la principal es **{top.index[0]}** "
-                     f"({top.iloc[0]} informes, {top.iloc[0] / len(RESTR) * 100:.0f}%). Conviene tratarla como punto "
-                     "fijo en la reunión de seguimiento con Repsol.")
-    ven = ENT_C[(ENT_C["Fecha"] >= K["vel_ini"]) & ENT_C["Código"].isin(S["Código"]) & ~ENT_C["Reentrega"]]
-    fin_sem = ven[~ven["Fecha"].map(es_habil)]
-    if len(fin_sem):
-        solo_hab = (len(ven) - len(fin_sem)) / n_vel
-        notas.append(f"De las entregas del alcance en la ventana, **{len(fin_sem)}** se hicieron en fin de semana o "
-                     f"feriado (días sin meta). Sin ese esfuerzo adicional la productividad sería de **{solo_hab:.1f} "
-                     f"informes/día hábil**" + (", por debajo de la meta: el cumplimiento actual depende de horas extra."
-                                                  if pd.notna(K["meta_prom"]) and solo_hab < K["meta_prom"] else "."))
-    if n_incons:
-        notas.append(f"Se detectaron **{n_incons}** registros por conciliar (ver pestaña *Calidad de Datos*).")
-    for nt in notas:
-        st.markdown(f"- {nt}")
-    acciones_rapidas("t1", corte)
-
-# ─────────────────────────── 2. PLAN VS REAL ───────────────────────────
-with tabs[1]:
-    alc_txt = " + ".join(alcance)
     if PLAN.empty:
         sin_datos("Registre el plan de entrega (Gestión de Matriz › Plan de entrega) para ver el control plan vs real.")
     else:
-        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700'>AVANCE ACUMULADO</div>",
-                    unsafe_allow_html=True)
+        # 1) Avance acumulado vs real
+        seccion("Avance acumulado", f"Avance acumulado {alc_txt}: proyectado vs real")
         g1, g2 = st.columns([4, 1])
         with g1:
             fig, p_c, r_c = fig_avance_acumulado(S, PLAN, K, corte, alc_txt)
@@ -1214,26 +1237,26 @@ with tabs[1]:
         with g2:
             brecha = r_c - p_c
             cumpl = r_c / p_c * 100 if p_c else np.nan
-            st.markdown("<div style='height:3.2rem'></div>" +
-                        tarjeta(f"{p_c:.0f}", f"Acumulado programado al {corte:%d/%m}", "#7F8C8D") +
+            st.markdown("<div style='height:2.6rem'></div>" +
+                        tarjeta(f"{p_c:.0f}", f"Acumulado programado al {corte:%d/%m}", C_NEUTRO) +
                         tarjeta(f"{r_c}", f"Acumulado real al {corte:%d/%m}", C_REAL) +
                         tarjeta(f"{brecha:+.0f}".replace("-", "−"),
-                                f"Brecha · {cumpl:.1f}% de cumplimiento" if pd.notna(cumpl) else "Brecha", "#1C2833"),
+                                f"Brecha · {cumpl:.1f}% de cumplimiento" if pd.notna(cumpl) else "Brecha",
+                                "#17A589" if brecha >= 0 else ROJO),
                         unsafe_allow_html=True)
-        st.caption("El real acumulado cuenta informes del alcance entregados desde el inicio del plan (primera entrega). "
-                   "El tramo sin detalle diario se une en línea recta hasta la fecha de corte de las listas.")
+        st.caption("Real acumulado = informes del alcance entregados desde el inicio del plan (primera entrega). El tramo "
+                   "sin detalle diario se une en línea recta hasta la fecha de corte de las listas.")
 
-        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700;margin-top:1rem'>"
-                    "ENTREGAS DIARIAS</div>", unsafe_allow_html=True)
+        # 2) Entregas diarias
+        seccion("Entregas diarias", "Plan diario por día hábil vs entregas reales")
         fig, hay_extra = fig_plan_diario(INF, PLAN, alcance, corte, K["meta_prom"])
         mostrar(fig)
         st.caption("Real por grupo = primera entrega de cada informe (sin reentregas). Las barras rayadas distribuyen en "
                    "promedio las entregas sin detalle diario."
-                   + (" Los días marcados con * son fines de semana o feriados sin meta en los que hubo entregas." if hay_extra else ""))
+                   + (" Los días con * son fines de semana o feriados sin meta en los que hubo entregas." if hay_extra else ""))
 
-        st.markdown(f"<div style='font-size:.8rem;letter-spacing:.08em;color:{C_REAL};font-weight:700;margin-top:1rem'>"
-                    "HITOS DE CONTROL</div>", unsafe_allow_html=True)
-        st.markdown(f"#### Puntos de control semanales · {alc_txt}")
+        # 3) Hitos de control
+        seccion("Hitos de control", f"Puntos de control semanales · {alc_txt}")
         fin_p = K["fin_plan"] if pd.notna(K["fin_plan"]) else PLAN["Fecha"].max()
         viernes = [d for d in PLAN["Fecha"] if d.weekday() == 4 and d > K["d0"] and d <= fin_p]
         opciones_h = sorted(set(PLAN["Fecha"]) | {corte})
@@ -1244,164 +1267,119 @@ with tabs[1]:
         th = tabla_hitos(S, PLAN, K, corte, sel_h or defecto)
         marca = th.pop("_corte")
         sty = (th.style
-               .apply(lambda r: ["background-color: rgba(214,204,186,.45); font-weight:600"
-                                 if marca[r.name] else "" for _ in r], axis=1)
-               .apply(lambda c: [("color:#B03A2E;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) and v < 0
-                                  else "color:#148F77;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) else "")
-                                 for v in c], subset=["Brecha"])
+               .apply(lambda r: ["background-color: rgba(211,84,0,.14); font-weight:600" if marca[r.name] else "" for _ in r], axis=1)
+               .apply(lambda col: [("color:#E74C3C;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) and v < 0
+                                    else "color:#17A589;font-weight:600" if isinstance(v, (int, float)) and pd.notna(v) else "")
+                                   for v in col], subset=["Brecha"])
                .format({"% avance programado": "{:.1f}%", "% avance real": lambda v: "—" if pd.isna(v) else f"{v:.1f}%",
                         "Acumulado real": lambda v: "—" if pd.isna(v) else f"{int(v)}",
                         "Pendiente real": lambda v: "—" if pd.isna(v) else f"{int(v)}",
                         "Brecha": lambda v: "—" if pd.isna(v) else f"{int(v):+d}"}))
         st.dataframe(sty, hide_index=True, use_container_width=True)
-        ini8 = PLAN[PLAN["Meta Diaria"] >= (K["meta_prom"] or 1)]["Fecha"].min() if pd.notna(K["meta_prom"]) else None
-        st.caption((f"Programa: {K['meta_prom']:.0f} informes por día hábil a partir del {ini8:%d/%m}. " if ini8 is not None and pd.notna(ini8) else "")
-                   + f"Línea base {K['b0']} informes al {K['d0']:%d/%m}. Pendiente real incluye informes incorporados "
-                   "al alcance después de la línea base. El control real se actualiza en cada corte.")
-    acciones_rapidas("tpv", corte)
+        ini8 = PLAN[PLAN["Meta Diaria"] >= K["meta_prom"]]["Fecha"].min() if pd.notna(K["meta_prom"]) else pd.NaT
+        st.caption((f"Programa: {K['meta_prom']:.0f} informes por día hábil a partir del {ini8:%d/%m}. " if pd.notna(ini8) else "")
+                   + f"Línea base {K['b0']} informes al {K['d0']:%d/%m}. Pendiente real incluye informes incorporados al "
+                   "alcance después de la línea base. El control real se actualiza en cada corte.")
 
-# ─────────────────────── 3. AVANCE Y PRODUCTIVIDAD ───────────────────────
-with tabs[2]:
+        # 4) Curva S
+        seccion("Curva S", "Entregas acumuladas por grupo vs plan acumulado")
+        mostrar(fig_curva_s(INF, PLAN, K, corte, alcance))
+        st.caption(f"Áreas apiladas: entregas acumuladas de cada grupo desde el {K['d0'] + pd.Timedelta(days=1):%d/%m}. "
+                   f"La línea discontinua es el plan del alcance {alc_txt}; lo que excede la línea es el aporte de los demás grupos.")
+
     if ENT_C.empty:
         sin_datos("No hay entregas diarias registradas hasta la fecha de corte.")
     else:
-        dia = ENT_C.assign(Serie=np.where(ENT_C["Reentrega"], "Reentrega", ENT_C["Grupo maestro"].fillna("G1")))
-        d = dia.groupby(["Fecha", "Serie"]).size().reset_index(name="N")
-        fig = px.bar(d, x="Fecha", y="N", color="Serie", color_discrete_map=COLOR_GRUPO, text="N",
-                     category_orders={"Serie": ["G1", "G2", "G3", "Reentrega"]})
-        if len(PLAN):
-            p = PLAN[(PLAN["Fecha"] >= ENT_C["Fecha"].min()) & (PLAN["Fecha"] <= corte)]
-            fig.add_scatter(x=p["Fecha"], y=p["Meta Diaria"], name="Meta diaria", mode="lines+markers",
-                            line=dict(color="#17202A", dash="dash", shape="hv"))
-        fig.update_layout(barmode="stack", yaxis_title="Informes entregados", xaxis_title=None)
-        fig.update_xaxes(tickformat="%a %d/%m", dtick=86400000)
-        mostrar(estilo(fig, 390, "Entregas diarias por grupo vs meta"))
-
         g1, g2 = st.columns(2)
         with g1:
-            if len(PLAN):
-                d0 = K["d0"]
-                pl = PLAN[PLAN["Fecha"] > d0].copy()
-                pl["Plan acumulado"] = pl["Meta Diaria"].cumsum()
-                rp = entregas_por_dia(S)
-                rp = rp[(rp.index > d0) & (rp.index <= corte)].cumsum()
-                fig = go.Figure()
-                fig.add_scatter(x=pl["Fecha"], y=pl["Plan acumulado"], name="Plan acumulado", mode="lines",
-                                line=dict(color=GRIS, dash="dash", width=2.5))
-                fig.add_scatter(x=rp.index, y=rp.values, name="Real acumulado", mode="lines+markers",
-                                line=dict(color=AZUL, width=3))
-                fig.add_hline(y=K["b0"], line_color=NARANJA, line_dash="dot",
-                              annotation_text=f"Alcance inicial {K['b0']}", annotation_position="top left")
-                fig.update_xaxes(tickformat="%d/%m")
-                fig.update_layout(yaxis_title="Informes entregados", hovermode="x unified")
-                mostrar(estilo(fig, 380, f"Curva S: entregas acumuladas {' + '.join(alcance)}"))
-            else:
-                sin_datos("Registre el plan de entrega para ver la curva S.")
+            seccion("Entregas por tipo", "Mix de entregas por tipo (GP_AD)")
+            mostrar(fig_tipo(ENT_C))
+            st.caption("Todas las entregas del registro diario (incluye reentregas), por grupo del maestro.")
         with g2:
-            t = ENT_C.groupby(["Tipo (GP_AD)", "Grupo maestro"]).size().reset_index(name="N")
-            t["Tipo (GP_AD)"] = t["Tipo (GP_AD)"].replace("", "Sin tipo")
-            orden = t.groupby("Tipo (GP_AD)")["N"].sum().sort_values().index.tolist()
-            fig = px.bar(t, x="N", y="Tipo (GP_AD)", color="Grupo maestro", orientation="h", text="N",
-                         color_discrete_map=COLOR_GRUPO, category_orders={"Tipo (GP_AD)": orden[::-1]})
-            fig.update_layout(barmode="stack", xaxis_title="Entregas", yaxis_title=None)
-            mostrar(estilo(fig, 380, "Mix de entregas por tipo (GP_AD)"))
+            seccion("Estabilidad de productividad", "Productividad diaria · gráfico I-MR")
+            fig, info = fig_imr(ENT_C, corte, K["meta_prom"])
+            if fig is None:
+                sin_datos("Se requieren al menos 5 días hábiles con registro para el gráfico de control.")
+            else:
+                mostrar(fig)
+                st.caption(f"Media {info['media']:.1f} · LSC {info['lsc']:.1f} · LIC {info['lic']:.1f} "
+                           f"(n={info['n']} días hábiles; {info['fuera']} fuera de control)."
+                           + (f" No incluye {info['no_hab']} entregas en {info['dias_no_hab']} día(s) no hábil(es)."
+                              if info["no_hab"] else "")
+                           + " Con pocos días los límites son orientativos.")
 
-        st.markdown("##### 📉 Estabilidad de la productividad diaria (gráfico I-MR)")
-        hab = ENT_C.groupby("Fecha").size()
-        rango = pd.date_range(ENT_C["Fecha"].min(), corte)
-        hab = hab.reindex(rango, fill_value=0)
-        hab = hab[[es_habil(x) for x in hab.index]]
-        if len(hab) >= 5:
-            x = hab.to_numpy(dtype=float)
-            media, mr = x.mean(), np.abs(np.diff(x)).mean()
-            lsc, lic = media + 2.66 * mr, max(0.0, media - 2.66 * mr)
-            fig = go.Figure()
-            fig.add_scatter(x=hab.index, y=x, mode="lines+markers+text", text=x.astype(int), textposition="top center",
-                            name="Entregas por día hábil", line=dict(color=AZUL_CL), marker=dict(color=AZUL, size=8))
-            fuera = (x > lsc) | (x < lic)
-            fig.add_scatter(x=hab.index[fuera], y=x[fuera], mode="markers", name="Fuera de control",
-                            marker=dict(color=ROJO, size=13, symbol="diamond"))
-            for y, n, col, dsh in [(media, "Media", "#17202A", "solid"), (lsc, "LSC", NARANJA, "dash"), (lic, "LIC", NARANJA, "dash")]:
-                fig.add_hline(y=y, line_color=col, line_dash=dsh, annotation_text=f"{n} {y:.1f}", annotation_position="right")
-            if pd.notna(K["meta_prom"]):
-                fig.add_hline(y=K["meta_prom"], line_color=VERDE_AZ, line_dash="dot",
-                              annotation_text=f"Meta {K['meta_prom']:.0f}", annotation_position="left")
-            fig.update_xaxes(tickformat="%a %d/%m")
-            fig.update_layout(yaxis_title="Informes / día")
-            mostrar(estilo(fig, 360))
-            st.caption(f"Media {media:.1f} · LSC {lsc:.1f} · LIC {lic:.1f} (n={len(x)} días hábiles). Con pocos días los "
-                       "límites son orientativos; si la meta cae fuera de la banda, el proceso actual no la alcanza de "
-                       "forma sostenida y requiere un cambio de capacidad o método.")
+    seccion("Lectura gerencial", "Conclusiones del periodo")
+    notas = []
+    if pd.notna(K["spi"]):
+        est = "por encima" if K["spi"] >= 100 else "por debajo"
+        notas.append(f"El avance real acumulado del alcance {alc_txt} ({K['real_acum']} informes desde el "
+                     f"{K['d0'] + pd.Timedelta(days=1):%d/%m}) está **{est} del plan** ({K['plan_acum']:.0f}): "
+                     f"cumplimiento de **{K['spi']:.0f}%**.")
+    if K.get("crec_alcance"):
+        pl_hoy = serie_plan(PLAN, K["b0"])
+        pl_hoy = pl_hoy[pl_hoy["Fecha"] <= corte]["Plan"].iloc[-1] if len(pl_hoy) else np.nan
+        notas.append(f"El alcance creció en **{K['crec_alcance']}** informes desde la línea base del {K['d0']:%d/%m} "
+                     f"({K['b0']} → {K['total']}); aun entregando más de lo planificado, el backlog real "
+                     f"(**{K['pendientes']}**) se compara con **{pl_hoy:.0f}** del plan a la fecha.")
+    if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
+        notas.append(f"Con **{K['vel']:.1f} informes/día** (meta {K['meta_prom']:.0f}), los **{K['pendientes']} pendientes** "
+                     f"se cerrarían hacia el **{K['cierre']:%d/%m/%Y}** frente al **{K['fin_plan']:%d/%m/%Y}** del plan"
+                     + (" — se requiere reforzar capacidad o priorizar." if K["cierre"] > K["fin_plan"] else "."))
+        if K["cierre"] > K["fin_plan"] and K["pendientes"]:
+            dias_rest = max(1, int(np.busday_count(np.datetime64(corte.date()), np.datetime64(K["fin_plan"].date()), holidays=HOL)))
+            notas.append(f"Para cumplir la fecha del plan se necesitan **{K['pendientes'] / dias_rest:.1f} informes/día hábil**.")
+    ven = ENT_C[(ENT_C["Fecha"] >= K["vel_ini"]) & ENT_C["Código"].isin(S["Código"]) & ~ENT_C["Reentrega"]]
+    fin_sem = ven[~ven["Fecha"].map(es_habil)]
+    if len(fin_sem):
+        solo_hab = (len(ven) - len(fin_sem)) / n_vel
+        notas.append(f"De las entregas del alcance en la ventana, **{len(fin_sem)}** se hicieron en fin de semana o feriado. "
+                     f"Sin ese esfuerzo adicional la productividad sería de **{solo_hab:.1f} informes/día hábil**"
+                     + (", por debajo de la meta: el cumplimiento actual depende de horas extra."
+                        if pd.notna(K["meta_prom"]) and solo_hab < K["meta_prom"] else "."))
+    if len(RESTR):
+        top = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts()
+        notas.append(f"**{len(RESTR)}** pendientes dependen de gestiones externas; la principal es **{top.index[0]}** "
+                     f"({top.iloc[0]} informes, {top.iloc[0] / len(RESTR) * 100:.0f}%).")
+    if n_incons:
+        notas.append(f"Se detectaron **{n_incons}** registros por conciliar (ver pestaña *Calidad de Datos*).")
+    for nt in notas:
+        st.markdown(f"- {nt}")
+
+    with st.expander(f"🚧 Backlog pendiente y restricciones ({len(PEND)} pendientes · {len(RESTR)} con restricción)"):
+        if PEND.empty:
+            st.success("No hay informes pendientes. ✅")
         else:
-            sin_datos("Se requieren al menos 5 días hábiles con registro para el gráfico de control.")
+            b1, b2 = st.columns(2)
+            with b1:
+                b = PEND.copy()
+                b["Antigüedad"] = pd.cut(b["Antigüedad (días háb.)"].fillna(-1), [-np.inf, -0.5, 5, 10, 20, np.inf],
+                                         labels=["Sin fecha", "0–5", "6–10", "11–20", ">20"]).astype(str)
+                a = b.groupby(["Antigüedad", "Grupo"]).size().reset_index(name="N")
+                fig = px.bar(a, x="Antigüedad", y="N", color="Grupo", text="N", color_discrete_map=COLOR_TAB,
+                             category_orders={"Antigüedad": ["0–5", "6–10", "11–20", ">20", "Sin fecha"], "Grupo": GRUPOS})
+                fig.update_layout(barmode="stack", xaxis_title="Días hábiles desde el ingreso", yaxis_title="Pendientes")
+                mostrar(estilo(fig, 360, "Antigüedad del backlog pendiente"))
+            with b2:
+                if len(RESTR):
+                    p = (RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts()
+                         .rename_axis("Restricción").reset_index(name="N"))
+                    fig = px.bar(p.sort_values("N"), x="N", y="Restricción", orientation="h", text="N",
+                                 color_discrete_sequence=[C_REAL])
+                    fig.update_layout(xaxis_title="Pendientes", yaxis_title=None)
+                    mostrar(estilo(fig, 360, "Pendientes por restricción externa"))
+            q = st.text_input("Buscar pendiente (N°, TAG, restricción…)", key="bk_q")
+            v = PEND
+            if q:
+                v = v[v.astype(str).apply(lambda r: r.str.contains(q, case=False)).any(axis=1)]
+            st.dataframe(v[["Código", "Grupo", "Plan", "TAG / Circuito", "Restricción", "Fecha Ingreso",
+                            "Antigüedad (días háb.)"]].sort_values("Antigüedad (días háb.)", ascending=False),
+                         hide_index=True, use_container_width=True,
+                         column_config={"Fecha Ingreso": st.column_config.DateColumn(format="DD/MM/YYYY")})
 
-        st.markdown("##### 📋 Plan vs real por día")
-        if len(PLAN):
-            real_d = ENT_C.groupby("Fecha").size()
-            real_s = entregas_por_dia(S)
-            tab = PLAN[(PLAN["Fecha"] >= ENT_C["Fecha"].min()) & (PLAN["Fecha"] <= corte)].copy()
-            tab["Real (todos)"] = tab["Fecha"].map(real_d).fillna(0).astype(int)
-            tab[f"Real {'+'.join(alcance)}"] = tab["Fecha"].map(real_s).fillna(0).astype(int)
-            tab["Desvío alcance"] = tab[f"Real {'+'.join(alcance)}"] - tab["Meta Diaria"]
-            st.dataframe(tab, hide_index=True, use_container_width=True,
-                         column_config={"Fecha": st.column_config.DateColumn(format="ddd DD/MM/YYYY")})
-    acciones_rapidas("t2", corte)
-
-# ─────────────────────── 3. BACKLOG Y RESTRICCIONES ───────────────────────
-with tabs[3]:
-    if PEND.empty:
-        st.success("No hay informes pendientes. ✅")
-    else:
-        g1, g2 = st.columns(2)
-        with g1:
-            b = PEND.copy()
-            b["Antigüedad"] = pd.cut(b["Antigüedad (días háb.)"].fillna(-1), [-np.inf, -0.5, 5, 10, 20, np.inf],
-                                     labels=["Sin fecha", "0–5", "6–10", "11–20", ">20"]).astype(str)
-            a = b.groupby(["Antigüedad", "Grupo"]).size().reset_index(name="N")
-            fig = px.bar(a, x="Antigüedad", y="N", color="Grupo", text="N", color_discrete_map=COLOR_GRUPO,
-                         category_orders={"Antigüedad": ["0–5", "6–10", "11–20", ">20", "Sin fecha"], "Grupo": GRUPOS})
-            fig.update_layout(barmode="stack", xaxis_title="Días hábiles desde el ingreso al backlog", yaxis_title="Pendientes")
-            mostrar(estilo(fig, 380, "Antigüedad del backlog pendiente"))
-        with g2:
-            if len(RESTR):
-                p = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts().rename_axis("Restricción").reset_index(name="N")
-                p["Acum"] = p["N"].cumsum() / p["N"].sum() * 100
-                vital = p["Acum"].shift(fill_value=0) < 80
-                fig = make_subplots(specs=[[{"secondary_y": True}]])
-                fig.add_bar(x=p["Restricción"], y=p["N"], text=p["N"], name="Pendientes",
-                            marker_color=np.where(vital, NARANJA, GRIS))
-                fig.add_scatter(x=p["Restricción"], y=p["Acum"], name="% acumulado", mode="lines+markers",
-                                line=dict(color=AZUL, width=2.5), secondary_y=True)
-                fig.add_scatter(x=p["Restricción"], y=[80] * len(p), name="80%", mode="lines",
-                                line=dict(color="#17202A", dash="dot"), secondary_y=True)
-                fig.update_yaxes(title_text="Pendientes", secondary_y=False)
-                fig.update_yaxes(range=[0, 105], showgrid=False, secondary_y=True, title_text="% acumulado")
-                mostrar(estilo(fig, 380, "Pareto de restricciones externas (G3)"))
-            else:
-                sin_datos("No hay pendientes con restricción registrada.")
-
-        tm = PEND.assign(Plan=PEND["Plan"].replace("", "Sin plan"),
-                         Restricción=PEND["Restricción"].replace("", "Sin restricción"))
-        fig = px.treemap(tm, path=[px.Constant("Backlog pendiente"), "Grupo", "Plan", "Restricción"],
-                         color="Grupo", color_discrete_map={**COLOR_GRUPO, "(?)": "#EAF2F8"})
-        fig.update_traces(textinfo="label+value")
-        mostrar(estilo(fig, 420, "Composición del backlog pendiente: grupo › plan › restricción"))
-
-        st.markdown("##### 📋 Detalle de pendientes")
-        c1, c2 = st.columns([1, 2])
-        fg = c1.multiselect("Grupo", GRUPOS, default=GRUPOS, key="bk_g")
-        q = c2.text_input("Buscar (N°, TAG, restricción…)", key="bk_q")
-        v = PEND[PEND["Grupo"].isin(fg)]
-        if q:
-            v = v[v.astype(str).apply(lambda r: r.str.contains(q, case=False)).any(axis=1)]
-        st.dataframe(v[["Código", "Grupo", "Plan", "TAG / Circuito", "Restricción", "Fecha Ingreso",
-                        "Antigüedad (días háb.)", "Observaciones"]].sort_values("Antigüedad (días háb.)", ascending=False),
-                     hide_index=True, use_container_width=True,
-                     column_config={"Fecha Ingreso": st.column_config.DateColumn(format="DD/MM/YYYY")})
-    acciones_rapidas("t3", corte)
+    acciones_rapidas("ti", corte)
 
 # ─────────────────────────── 4. CALIDAD DE DATOS ───────────────────────────
-with tabs[4]:
+with tabs[1]:
     st.markdown("La confiabilidad del KPI depende de la conciliación entre las listas por grupo, el registro diario y "
                 "el plan. Estas verificaciones se recalculan con cada actualización.")
     cols = st.columns(3)
@@ -1419,7 +1397,7 @@ with tabs[4]:
             st.markdown(f"- {nt}")
 
 # ─────────────────────────── 5. GESTIÓN DE MATRIZ ───────────────────────────
-with tabs[5]:
+with tabs[2]:
     s1, s2, s3, s4, s5, s6, s7 = st.tabs(["📬 Registrar entregas", "➕ Nuevo informe", "✏️ Maestro de informes",
                                           "📅 Registro diario", "🗓️ Plan de entrega", "⬆️ Subir matriz", "⬇️ Descargar"])
     with s1:
