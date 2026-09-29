@@ -1,21 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-KPI ENTREGA DE INFORMES — Tablero de control y gestión de la matriz
-ADEMINSAC | Gestión de Proyectos · Mejora Continua
+KPI ENTREGA DE INFORMES — Seguimiento de cierre de backlog
+ADEMINSAC · Contrato N° 3700002135 · Refinería La Pampilla
 
-KPIs principales
-- OTD  : % de informes entregados dentro del plazo (On-Time Delivery)
-- Lead Time : días desde la ejecución del servicio hasta la entrega del informe
-- FPY  : % de informes aprobados sin revisiones (First Pass Yield)
-- Backlog / Vencidos : informes pendientes y pendientes fuera de plazo
-- Estabilidad del proceso : gráfico de control I-MR del lead time
+Modelo de datos (archivo canónico data/matriz_kpi_informes.xlsx)
+  INFORMES : maestro, una fila por informe (G1 / G2 / G3)
+  ENTREGAS : registro diario de entregas (FECHA · N° · GRUPO · GP_AD)
+  PLAN     : meta diaria del plan de entrega
+  NOTAS    : notas de conciliación generadas al importar
+También importa y exporta el formato de seguimiento original
+(INFORMES G1 G2 G3 · PENDIENTES G3 · Plan de entrega · Avance Diario).
 """
 from __future__ import annotations
 
 import base64
 import io
+import math
 import re
-import unicodedata
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -28,79 +29,47 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 # ════════════════════════════════════════════════════════════════════
-# CONFIGURACIÓN GENERAL
+# CONFIGURACIÓN
 # ════════════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="KPI Entrega de Informes | ADEMINSAC",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="KPI Entrega de Informes | ADEMINSAC", page_icon="📊",
+                   layout="wide", initial_sidebar_state="expanded")
 
 DATA_DIR = Path(__file__).parent / "data"
 DATA_FILE = DATA_DIR / "matriz_kpi_informes.xlsx"
-SHEET = "MATRIZ"
 TZ = ZoneInfo("America/Lima")
+PREFIJO = "ADEMINSAC-FIAB-RLP"
 
-COLUMNS = [
-    "ID", "N° OT", "Especialidad", "Tipo de Informe", "Unidad / Área",
-    "Equipo / TAG", "Responsable", "Fecha Ejecución", "Fecha Compromiso",
-    "Fecha Entrega", "Estado", "N° Revisiones", "Causa de Retraso", "Observaciones",
-]
-DATE_COLS = ["Fecha Ejecución", "Fecha Compromiso", "Fecha Entrega"]
-TEXT_COLS = [c for c in COLUMNS if c not in DATE_COLS + ["N° Revisiones"]]
+COLS_INF = ["Código", "N° Informe", "Adicional", "Grupo", "Plan", "TAG / Circuito", "Restricción",
+            "Fecha Ingreso", "Estado", "Fecha Entrega", "Tipo (GP_AD)", "Observaciones"]
+COLS_ENT = ["Fecha", "N° Informe", "Código", "Grupo", "Tipo (GP_AD)", "Observaciones"]
+COLS_PLAN = ["Fecha", "Meta Diaria"]
 
-ESPECIALIDADES = ["END", "Estáticos", "Dinámicos", "Instrumentación", "Electricidad", "SSOMA"]
-TIPOS = ["Informe Técnico", "Informe END", "Informe de Hallazgos", "Informe de Calibración",
-         "Informe SSOMA", "Informe Final"]
-ESTADOS = ["Pendiente", "En elaboración", "En revisión", "Entregado", "Observado", "Aprobado", "Anulado"]
-CAUSAS = ["Carga de trabajo", "Demora en revisión interna", "Falta de información de campo",
-          "Espera de resultados / laboratorio", "Observaciones del cliente", "Acceso / permisos",
-          "Cambio de alcance", "Otros"]
+GRUPOS = ["G1", "G2", "G3"]
+DESC_GRUPO = {"G1": "Pendientes hasta Inf. 1110", "G2": "Pendientes post Inf. 1110",
+              "G3": "Pendientes con restricción (Repsol)"}
+# Códigos GP_AD usados en «Avance Diario». Complete la descripción según su nomenclatura.
+TIPOS_GPAD = {"EQ": "EQ", "L": "L", "E": "E", "NP": "NP", "PSV": "PSV"}
+PLANES = ["Plan de equipos", "Plan de circuitos", "HORAS"]
+RESTRICCIONES = ["CORREGIR PSAIM", "PENDIENTE DESCARGA PSAIM", "UT MANUAL", "INSPECCION",
+                 "Pend. Isométrico (Circuitos)"]
+OBS_MARCA = "Marcado como entregado en la matriz"
+OBS_HIST = "sin detalle diario"
 
-# Paleta apta para daltonismo (azul/naranja como par principal)
-AZUL, AZUL_CL, NARANJA, GRIS, ROJO = "#1F4E79", "#5DADE2", "#E67E22", "#A6ACAF", "#B03A2E"
-COLOR_SIT = {
-    "Entregado a tiempo": AZUL, "Entregado fuera de plazo": NARANJA,
-    "Entregado (sin plazo)": GRIS, "Pendiente en plazo": AZUL_CL, "Pendiente vencido": ROJO,
-}
+AZUL, AZUL_CL, NARANJA, GRIS, ROJO, VERDE_AZ = "#1F4E79", "#5DADE2", "#E67E22", "#A6ACAF", "#B03A2E", "#148F77"
+COLOR_GRUPO = {"G1": AZUL, "G2": AZUL_CL, "G3": NARANJA, "Reentrega": GRIS}
 
-ALIASES = {
-    "ID": ["id", "item", "codigo", "cod", "correlativo", "codinforme", "idinforme", "ninforme", "nroinforme"],
-    "N° OT": ["not", "ot", "nroot", "numeroot", "ordendetrabajo", "ordentrabajo", "nordentrabajo"],
-    "Especialidad": ["especialidad", "disciplina", "areatecnica", "especialidadtecnica"],
-    "Tipo de Informe": ["tipodeinforme", "tipoinforme", "tipodocumento", "tipo"],
-    "Unidad / Área": ["unidadarea", "unidad", "area", "planta", "ubicacion"],
-    "Equipo / TAG": ["equipotag", "tag", "equipo", "activo"],
-    "Responsable": ["responsable", "inspector", "elaboradopor", "autor", "encargado"],
-    "Fecha Ejecución": ["fechaejecucion", "fechainspeccion", "fechaservicio", "fechacampo",
-                        "fechatrabajo", "fechaejec", "fechadeejecucion", "fechadeinspeccion"],
-    "Fecha Compromiso": ["fechacompromiso", "fechalimite", "fechaplazo", "fechaprogramada",
-                         "fechaobjetivo", "fechadecompromiso", "fechalimitedeentrega"],
-    "Fecha Entrega": ["fechaentrega", "fechadeentrega", "fechaenvio", "fechaemision", "fechareal"],
-    "Estado": ["estado", "status", "situacion", "estadoinforme"],
-    "N° Revisiones": ["nrevisiones", "revisiones", "nrorevisiones", "rev", "reprocesos", "nrodeobservaciones"],
-    "Causa de Retraso": ["causaderetraso", "causaretraso", "motivoderetraso", "motivoretraso", "causa"],
-    "Observaciones": ["observaciones", "comentarios", "obs", "notas"],
-}
-
-st.markdown(
-    """
-    <style>
-    [data-testid="stMetric"]{background:rgba(31,78,121,.06);border:1px solid rgba(31,78,121,.18);
-        border-radius:10px;padding:10px 14px;}
-    [data-testid="stMetricLabel"] p{font-weight:600;}
-    .hdr{padding:.4rem 0 .2rem 0;border-bottom:3px solid #1F4E79;margin-bottom:.8rem;}
-    .hdr h1{font-size:1.65rem;margin:0;color:#1F4E79;}
-    .hdr p{margin:.1rem 0 0 0;opacity:.75;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+[data-testid="stMetric"]{background:rgba(31,78,121,.06);border:1px solid rgba(31,78,121,.18);
+  border-radius:10px;padding:10px 14px;}
+[data-testid="stMetricLabel"] p{font-weight:600;}
+.hdr{padding:.4rem 0 .2rem 0;border-bottom:3px solid #1F4E79;margin-bottom:.8rem;}
+.hdr h1{font-size:1.65rem;margin:0;color:#1F4E79;} .hdr p{margin:.1rem 0 0 0;opacity:.75;}
+</style>""", unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════════════
-# UTILIDADES: FECHAS Y FERIADOS (PERÚ)
+# FECHAS Y FERIADOS (PERÚ)
 # ════════════════════════════════════════════════════════════════════
 def hoy_lima() -> date:
     return datetime.now(TZ).date()
@@ -115,14 +84,11 @@ def _pascua(y: int) -> date:
     i, k = c // 4, c % 4
     l = (32 + 2 * e + 2 * i - h - k) % 7
     m = (a + 11 * h + 22 * l) // 451
-    mes = (h + l - 7 * m + 114) // 31
-    dia = ((h + l - 7 * m + 114) % 31) + 1
-    return date(y, mes, dia)
+    return date(y, (h + l - 7 * m + 114) // 31, ((h + l - 7 * m + 114) % 31) + 1)
 
 
 @st.cache_data
 def feriados_peru(y0: int, y1: int) -> np.ndarray:
-    """Feriados nacionales del Perú (fijos + Jueves y Viernes Santo). Editar si cambia la normativa."""
     fijos = [(1, 1), (5, 1), (6, 7), (6, 29), (7, 23), (7, 28), (7, 29), (8, 6),
              (8, 30), (10, 8), (11, 1), (12, 8), (12, 9), (12, 25)]
     dias = []
@@ -136,120 +102,487 @@ def feriados_peru(y0: int, y1: int) -> np.ndarray:
 HOL = feriados_peru(2018, hoy_lima().year + 2)
 
 
-def dias_entre(a: pd.Series, b: pd.Series, habiles: bool) -> pd.Series:
-    """Días de b respecto de a (positivo si b es posterior)."""
+def es_habil(d) -> bool:
+    return bool(np.is_busday(np.datetime64(pd.Timestamp(d).date()), holidays=HOL))
+
+
+def habiles_entre(a: pd.Series, b: pd.Timestamp) -> pd.Series:
     out = pd.Series(np.nan, index=a.index, dtype="float")
-    m = a.notna() & b.notna()
+    m = a.notna()
     if m.any():
-        if habiles:
-            out[m] = np.busday_count(a[m].values.astype("datetime64[D]"),
-                                     b[m].values.astype("datetime64[D]"), holidays=HOL)
-        else:
-            out[m] = (b[m].dt.normalize() - a[m].dt.normalize()).dt.days
-    return out
-
-
-def sumar_dias(s: pd.Series, n: int, habiles: bool) -> pd.Series:
-    out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-    m = s.notna()
-    if m.any():
-        if habiles:
-            r = np.busday_offset(s[m].values.astype("datetime64[D]"), n, roll="forward", holidays=HOL)
-            out[m] = pd.to_datetime(r)
-        else:
-            out[m] = s[m].dt.normalize() + pd.Timedelta(days=n)
+        out[m] = np.busday_count(a[m].values.astype("datetime64[D]"),
+                                 np.datetime64(pd.Timestamp(b).date()), holidays=HOL)
     return out
 
 
 def a_fecha(s: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(s):
-        return pd.to_datetime(s).dt.tz_localize(None) if getattr(s.dt, "tz", None) else s
+        return pd.to_datetime(s).dt.normalize()
     num = pd.to_numeric(s, errors="coerce")
-    out = pd.to_datetime(s.astype(str).where(s.notna(), None), errors="coerce",
-                         dayfirst=True, format="mixed")
-    serial = num.notna() & num.between(20000, 80000)          # fechas seriales de Excel
+    out = pd.to_datetime(s.astype(str).where(s.notna(), None), errors="coerce", dayfirst=True, format="mixed")
+    serial = num.notna() & num.between(20000, 80000)
     if serial.any():
         out[serial] = pd.to_datetime(num[serial], unit="D", origin="1899-12-30")
-    return out
+    return out.dt.normalize()
 
 
 # ════════════════════════════════════════════════════════════════════
-# UTILIDADES: ESTANDARIZACIÓN DE LA MATRIZ
+# CÓDIGOS DE INFORME
 # ════════════════════════════════════════════════════════════════════
-def _norm(txt) -> str:
-    t = unicodedata.normalize("NFKD", str(txt)).encode("ascii", "ignore").decode().lower()
-    return re.sub(r"[^a-z0-9]", "", t)
+def normalizar_codigo(txt) -> str:
+    t = re.sub(r"\s+", "", str(txt)).upper().replace("FLAB", "FIAB")   # corrige «FlAB»
+    return "" if t in ("", "NAN", "NONE") else t
 
 
-def mapeo_automatico(columnas) -> dict:
-    """Devuelve {columna_estándar: columna_origen} reconociendo nombres equivalentes."""
-    norm = {c: _norm(c) for c in columnas}
-    usados, mapa = set(), {}
-    for std in COLUMNS:                                   # 1) coincidencia exacta
-        for c, n in norm.items():
-            if c not in usados and (n == _norm(std) or n in ALIASES[std]):
-                mapa[std] = c
-                usados.add(c)
-                break
-    for std in COLUMNS:                                   # 2) coincidencia parcial
-        if std in mapa:
-            continue
-        for c, n in norm.items():
-            if c not in usados and any(len(a) >= 5 and a in n for a in ALIASES[std]):
-                mapa[std] = c
-                usados.add(c)
-                break
-    return mapa
+def numero_de(cod) -> float:
+    m = re.search(r"RLP-(\d+)", str(cod))
+    return float(m.group(1)) if m else np.nan
 
 
-def siguiente_id(df: pd.DataFrame, k: int = 1) -> list[str]:
-    nums = df["ID"].astype(str).str.extract(r"(\d+)\s*$")[0].dropna()
-    base = int(pd.to_numeric(nums, errors="coerce").max()) if len(nums) else 0
-    return [f"INF-{base + i:04d}" for i in range(1, k + 1)]
+def construir_codigo(n, anio: int, adicional: bool = False) -> str:
+    return f"{PREFIJO}-{int(n)}-{anio}" + ("-ADICIONAL" if adicional else "")
 
 
-def estandarizar(df: pd.DataFrame) -> pd.DataFrame:
+def _limpiar_texto(s: pd.Series) -> pd.Series:
+    return (s.astype(object).where(s.notna(), "").astype(str).str.strip().str.lstrip("`")
+            .replace({"nan": "", "None": "", "NaT": "", "<NA>": ""}))
+
+
+# ════════════════════════════════════════════════════════════════════
+# ESTANDARIZACIÓN
+# ════════════════════════════════════════════════════════════════════
+def std_inf(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    for c in COLUMNS:
+    for c in COLS_INF:
         if c not in df.columns:
             df[c] = None
-    df = df[COLUMNS]
-    for c in DATE_COLS:
+    df = df[COLS_INF]
+    for c in ["Fecha Ingreso", "Fecha Entrega"]:
         df[c] = a_fecha(df[c])
-    df["N° Revisiones"] = pd.to_numeric(df["N° Revisiones"], errors="coerce").fillna(0).clip(lower=0).astype(int)
-    for c in TEXT_COLS:
-        df[c] = (df[c].astype(object).where(df[c].notna(), "").astype(str).str.strip()
-                 .replace({"nan": "", "None": "", "NaT": "", "<NA>": ""}))
-    # quitar filas totalmente vacías
-    vacia = (df[TEXT_COLS].eq("").all(axis=1)) & df[DATE_COLS].isna().all(axis=1)
-    df = df[~vacia].reset_index(drop=True)
-    # estado: homologar mayúsculas / completar según fecha de entrega
-    homolog = {_norm(e): e for e in ESTADOS}
-    df["Estado"] = df["Estado"].map(lambda x: homolog.get(_norm(x), x))
-    sin_estado = df["Estado"].eq("")
-    df.loc[sin_estado, "Estado"] = np.where(df.loc[sin_estado, "Fecha Entrega"].notna(), "Entregado", "Pendiente")
-    # IDs faltantes
-    falt = df["ID"].eq("")
-    if falt.any():
-        df.loc[falt, "ID"] = siguiente_id(df, int(falt.sum()))
-    return df
+    for c in [c for c in COLS_INF if c not in ("N° Informe", "Fecha Ingreso", "Fecha Entrega")]:
+        df[c] = _limpiar_texto(df[c])
+    df["Código"] = df["Código"].map(normalizar_codigo)
+    n = pd.to_numeric(df["N° Informe"], errors="coerce")
+    falta = df["Código"].eq("") & n.notna()
+    df.loc[falta, "Código"] = [
+        construir_codigo(num, (f.year if pd.notna(f) else hoy_lima().year), ad == "Sí")
+        for num, f, ad in zip(n[falta], df.loc[falta, "Fecha Ingreso"], df.loc[falta, "Adicional"])]
+    df = df[df["Código"] != ""].copy()
+    df["N° Informe"] = df["Código"].map(numero_de).fillna(n).astype("Int64")
+    df["Adicional"] = np.where(df["Código"].str.contains("ADICIONAL"), "Sí", "No")
+    df["Grupo"] = df["Grupo"].str.upper()
+    df["Tipo (GP_AD)"] = df["Tipo (GP_AD)"].str.upper()
+    est = df["Estado"].str.lower()
+    df["Estado"] = np.where(est.str.startswith("entreg"), "Entregado",
+                            np.where(est.eq("") & df["Fecha Entrega"].notna(), "Entregado", "Pendiente"))
+    df = df.drop_duplicates("Código", keep="last")
+    return df.sort_values(["Grupo", "N° Informe", "Código"]).reset_index(drop=True)
 
 
-def desde_crudo(raw: pd.DataFrame, mapa: dict | None = None) -> pd.DataFrame:
-    raw = raw.dropna(how="all").dropna(axis=1, how="all")
-    raw.columns = [str(c).strip() for c in raw.columns]
-    mapa = mapa if mapa is not None else mapeo_automatico(raw.columns)
-    out = pd.DataFrame({std: raw[src] for std, src in mapa.items() if src in raw.columns})
-    return estandarizar(out)
+def std_ent(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in COLS_ENT:
+        if c not in df.columns:
+            df[c] = None
+    df = df[COLS_ENT]
+    df["Fecha"] = a_fecha(df["Fecha"])
+    for c in ["Código", "Grupo", "Tipo (GP_AD)", "Observaciones"]:
+        df[c] = _limpiar_texto(df[c])
+    df["Código"] = df["Código"].map(normalizar_codigo)
+    df["N° Informe"] = pd.to_numeric(df["N° Informe"], errors="coerce").fillna(df["Código"].map(numero_de)).astype("Int64")
+    df["Grupo"] = df["Grupo"].str.upper()
+    df["Tipo (GP_AD)"] = df["Tipo (GP_AD)"].str.upper()
+    df = df[df["Fecha"].notna() & (df["N° Informe"].notna() | df["Código"].ne(""))]
+    return df.sort_values(["Fecha"], kind="stable").reset_index(drop=True)
 
 
-def opciones(df: pd.DataFrame, col: str, base: list[str]) -> list[str]:
-    extra = [v for v in df[col].dropna().unique() if v and v not in base]
-    return base + sorted(extra)
+def std_plan(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for c in COLS_PLAN:
+        if c not in df.columns:
+            df[c] = None
+    df = df[COLS_PLAN]
+    df["Fecha"] = a_fecha(df["Fecha"])
+    df["Meta Diaria"] = pd.to_numeric(df["Meta Diaria"], errors="coerce").fillna(0.0)
+    df = df[df["Fecha"].notna()].groupby("Fecha", as_index=False)["Meta Diaria"].last()
+    return df.sort_values("Fecha").reset_index(drop=True)
+
+
+def resolver_codigo(inf: pd.DataFrame, n, grupo: str) -> str | None:
+    if pd.isna(n):
+        return None
+    c = inf[inf["N° Informe"] == int(n)]
+    if c.empty:
+        return None
+    for cond in [(c["Grupo"] == grupo) & (c["Estado"] != "Entregado"), c["Grupo"] == grupo,
+                 c["Estado"] != "Entregado", pd.Series(True, index=c.index)]:
+        s = c[cond]
+        if len(s):
+            return s.sort_values("Adicional").iloc[0]["Código"]      # prioriza el no adicional
+    return None
+
+
+def sincronizar(inf: pd.DataFrame, ent: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Completa códigos del registro diario y actualiza estado / fecha de entrega en el maestro."""
+    inf, ent = std_inf(inf), std_ent(ent)
+    nuevos = []
+    for i in ent.index:
+        cod = ent.at[i, "Código"]
+        if not cod:
+            cod = resolver_codigo(inf, ent.at[i, "N° Informe"], ent.at[i, "Grupo"])
+            if cod is None:
+                cod = construir_codigo(ent.at[i, "N° Informe"], ent.at[i, "Fecha"].year)
+            ent.at[i, "Código"] = cod
+        if cod not in set(inf["Código"]) and cod not in {r["Código"] for r in nuevos}:
+            nuevos.append({"Código": cod, "Grupo": ent.at[i, "Grupo"] or "G1", "Fecha Ingreso": ent.at[i, "Fecha"],
+                           "Observaciones": "Incorporado desde el registro de entregas (no figuraba en las listas)"})
+    if nuevos:
+        inf = std_inf(pd.concat([inf, pd.DataFrame(nuevos)], ignore_index=True))
+    gmap = inf.set_index("Código")["Grupo"]
+    vacio = ent["Grupo"].eq("")
+    ent.loc[vacio, "Grupo"] = ent.loc[vacio, "Código"].map(gmap).fillna("")
+    if len(ent):
+        prim = ent.sort_values("Fecha").groupby("Código").agg(F=("Fecha", "min"), T=("Tipo (GP_AD)", "last"))
+        m = inf["Código"].isin(prim.index)
+        inf.loc[m, "Fecha Entrega"] = inf.loc[m, "Código"].map(prim["F"])
+        inf.loc[m, "Estado"] = "Entregado"
+        sin_tipo = m & inf["Tipo (GP_AD)"].eq("")
+        inf.loc[sin_tipo, "Tipo (GP_AD)"] = inf.loc[sin_tipo, "Código"].map(prim["T"])
+        marca = m & inf["Observaciones"].str.startswith(OBS_MARCA)
+        inf.loc[marca, "Observaciones"] = ""
+    return std_inf(inf), std_ent(ent)
 
 
 # ════════════════════════════════════════════════════════════════════
-# PERSISTENCIA (archivo local + GitHub opcional)
+# IMPORTACIÓN DEL FORMATO ORIGINAL (INFORMES G1 G2 G3 · Avance Diario …)
+# ════════════════════════════════════════════════════════════════════
+def _rgb(c) -> str | None:
+    try:
+        return c.fill.fgColor.rgb if c.fill is not None and c.fill.fill_type else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _color_entregado(ws) -> str:
+    for row in ws.iter_rows():
+        for c in row:
+            if isinstance(c.value, str) and "entregado" in c.value.lower() and c.column > 1:
+                col = _rgb(ws.cell(c.row, c.column - 1))
+                if isinstance(col, str):
+                    return col
+    return "FFFFFF00"
+
+
+def _eval_simple(v):
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v.startswith("="):
+        expr = v[1:].lstrip("+")
+        if re.fullmatch(r"[\d\.\s\+\-\*/\(\)]+", expr):
+            try:
+                return float(eval(expr, {"__builtins__": {}}, {}))  # noqa: S307 (solo aritmética)
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
+def importar_formato_original(contenido: bytes):
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(contenido))
+    wv = load_workbook(io.BytesIO(contenido), data_only=True)
+    notas: list[str] = []
+    hoja = next(s for s in wb.sheetnames if re.search(r"INFORMES\s*G1", s, re.I))
+    ws = wb[hoja]
+    color = _color_entregado(ws)
+
+    snaps = []
+    for col in range(1, ws.max_column + 1):
+        g = str(ws.cell(2, col).value or "").strip().upper()
+        if g not in GRUPOS:
+            continue
+        m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", str(ws.cell(1, col).value or ""))
+        fecha = pd.Timestamp(int(m[3]), int(m[2]), int(m[1])) if m else pd.Timestamp(hoy_lima())
+        items = []
+        for r in range(3, ws.max_row + 1):
+            c = ws.cell(r, col)
+            v = c.value
+            if v is None or (isinstance(v, str) and (v.startswith("=") or "RLP" not in v.upper())):
+                continue
+            items.append((v, _rgb(c) == color))
+        snaps.append((g, fecha, items))
+
+    reg: dict[str, dict] = {}
+    for g in GRUPOS:
+        ss = sorted([s for s in snaps if s[0] == g], key=lambda s: s[1])
+        previos, f_prev = set(), None
+        for k, (_, fecha, items) in enumerate(ss):
+            ultimo = k == len(ss) - 1
+            actuales = set()
+            for v, pint in items:
+                cod = normalizar_codigo(v) if isinstance(v, str) else construir_codigo(int(v), fecha.year)
+                actuales.add(cod)
+                if cod not in reg:
+                    reg[cod] = {"Código": cod, "Grupo": g, "Fecha Ingreso": fecha, "Estado": "Pendiente",
+                                "Fecha Entrega": pd.NaT, "Observaciones": ""}
+                elif reg[cod]["Grupo"] != g:
+                    notas.append(f"{cod} figura en las listas {reg[cod]['Grupo']} y {g}; se conservó {reg[cod]['Grupo']}.")
+                if ultimo and pint:
+                    reg[cod].update({"Estado": "Entregado", "Fecha Entrega": fecha,
+                                     "Observaciones": f"{OBS_MARCA} (fecha referencial de corte)"})
+            salieron = previos - actuales
+            for cod in salieron:
+                if reg[cod]["Estado"] != "Entregado":
+                    reg[cod].update({"Estado": "Entregado", "Fecha Entrega": fecha,
+                                     "Observaciones": f"Entregado entre {f_prev + timedelta(days=1):%d/%m} y "
+                                                      f"{fecha:%d/%m} ({OBS_HIST}; fecha referencial)"})
+            if salieron:
+                notas.append(f"{g}: {len(salieron)} informes de la lista al {f_prev:%d/%m} ya no figuran al "
+                             f"{fecha:%d/%m}; se registraron como entregados en ese periodo (fecha referencial "
+                             f"{fecha:%d/%m}, {OBS_HIST}).")
+            nuevos = actuales - previos if previos else set()
+            if nuevos:
+                notas.append(f"{g}: {len(nuevos)} informes se incorporaron a la lista al {fecha:%d/%m} "
+                             f"({', '.join(sorted(str(int(numero_de(c))) for c in nuevos))}).")
+            previos, f_prev = actuales, fecha
+    typo = sum(1 for s in snaps for v, _ in s[2] if isinstance(v, str) and "FLAB" in v.upper())
+    if typo:
+        notas.append(f"Se corrigieron {typo} códigos escritos «FlAB» (L minúscula) por «FIAB».")
+
+    # Detalle de pendientes G3 / restricciones
+    for s in wb.sheetnames:
+        if s == hoja or not re.search(r"PENDIENTE", s, re.I):
+            continue
+        for row in wb[s].iter_rows(values_only=True):
+            if not row or not isinstance(row[0], str) or "RLP" not in row[0].upper():
+                continue
+            cod = normalizar_codigo(row[0])
+            det = {"Plan": row[1] if len(row) > 1 else "", "TAG / Circuito": str(row[2] or "").lstrip("`") if len(row) > 2 else "",
+                   "Restricción": row[3] if len(row) > 3 else ""}
+            if cod not in reg:
+                reg[cod] = {"Código": cod, "Grupo": "G3", "Fecha Ingreso": pd.NaT, "Estado": "Pendiente",
+                            "Fecha Entrega": pd.NaT, "Observaciones": f"Tomado de la hoja «{s}»"}
+            reg[cod].update({k: v for k, v in det.items() if v})
+
+    # Registro de entregas diarias
+    log = []
+    for s in wb.sheetnames:
+        if not re.search(r"AVANCE", s, re.I):
+            continue
+        wsa = wb[s]
+        hdr, cols = None, {}
+        for r in range(1, min(wsa.max_row, 40) + 1):
+            vals = {str(wsa.cell(r, c).value or "").strip().upper(): c for c in range(1, wsa.max_column + 1)}
+            if "FECHA" in vals and "CODIGO" in vals:
+                hdr, cols = r, vals
+                break
+        if not hdr:
+            continue
+        for r in range(hdr + 1, wsa.max_row + 1):
+            f = wsa.cell(r, cols["FECHA"]).value
+            n = wsa.cell(r, cols["CODIGO"]).value
+            if not isinstance(f, datetime) or n is None:
+                continue
+            cod = normalizar_codigo(n) if isinstance(n, str) and "RLP" in n.upper() else ""
+            log.append({"Fecha": f, "N° Informe": numero_de(cod) if cod else pd.to_numeric(n, errors="coerce"),
+                        "Código": cod, "Grupo": str(wsa.cell(r, cols["GRUPO"]).value or "") if "GRUPO" in cols else "",
+                        "Tipo (GP_AD)": str(wsa.cell(r, cols["GP_AD"]).value or "") if "GP_AD" in cols else "",
+                        "Observaciones": ""})
+
+    # Plan de entrega
+    plan_rows, real_prev = [], {}
+    for s in wb.sheetnames:
+        if not re.search(r"PLAN", s, re.I):
+            continue
+        pv, pf = wv[s], wb[s]
+        fila_f = max(range(1, pv.max_row + 1),
+                     key=lambda r: sum(isinstance(pv.cell(r, c).value, datetime) for c in range(1, pv.max_column + 1)))
+        fila_p = fila_r = None
+        for r in range(1, pv.max_row + 1):
+            t = str(pv.cell(r, 1).value or "").lower()
+            if "entrega" in t and "acumul" not in t and "proyect" in t:
+                fila_p = r
+            if "entrega" in t and "acumul" not in t and "real" in t:
+                fila_r = r
+        if not fila_p:
+            continue
+        for c in range(2, pv.max_column + 1):
+            f = pv.cell(fila_f, c).value
+            if not isinstance(f, datetime):
+                continue
+            v = pv.cell(fila_p, c).value
+            v = _eval_simple(v if v is not None else pf.cell(fila_p, c).value)
+            if v is not None:
+                plan_rows.append({"Fecha": f, "Meta Diaria": v})
+            if fila_r:
+                rv = pv.cell(fila_r, c).value
+                rv = _eval_simple(rv if rv is not None else pf.cell(fila_r, c).value)
+                if rv is not None:
+                    real_prev[pd.Timestamp(f).normalize()] = rv
+        break
+
+    inf = std_inf(pd.DataFrame(list(reg.values())))
+    ent = std_ent(pd.DataFrame(log, columns=COLS_ENT))
+    inf, ent = sincronizar(inf, ent)
+    plan = std_plan(pd.DataFrame(plan_rows, columns=COLS_PLAN))
+
+    # Verificaciones del plan original
+    if real_prev and len(ent):
+        gm = inf.set_index("Código")["Grupo"]
+        tot = ent.groupby("Fecha").size()
+        g1 = ent[ent["Código"].map(gm) == "G1"].groupby("Fecha").size()
+        dias = [d for d in tot.index if d in real_prev]
+        if dias and all(abs(real_prev[d] - tot[d]) < .01 for d in dias) and any(tot[d] != g1.get(d, 0) for d in dias):
+            notas.append("La fila «Entregas G1-real» del plan original suma las entregas diarias de todos los grupos "
+                         f"(G1+G2+G3), no solo G1; entre el {dias[0]:%d/%m} y el {dias[-1]:%d/%m} sobreestima el avance "
+                         f"G1 en {int(sum(tot[d] - g1.get(d, 0) for d in dias))} informes. El tablero calcula el real por grupo.")
+        antes = [d for d in real_prev if len(ent) and d < ent["Fecha"].min()]
+        pl = plan.set_index("Fecha")["Meta Diaria"]
+        if antes and all(abs(real_prev[d] - pl.get(d, -1)) < .01 for d in antes):
+            notas.append(f"Los valores «reales» del {min(antes):%d/%m} al {max(antes):%d/%m} replican el proyectado; "
+                         "no existe detalle diario de ese periodo.")
+    rep = len(ent) - ent["Código"].nunique()
+    if rep:
+        notas.append(f"El registro diario contiene {rep} entrega(s) repetida(s) del mismo informe (reentregas).")
+    return inf, ent, plan, notas
+
+
+def es_formato_original(contenido: bytes) -> bool:
+    try:
+        return any(re.search(r"INFORMES\s*G1", s, re.I) for s in pd.ExcelFile(io.BytesIO(contenido)).sheet_names)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def importar_canonico(contenido: bytes):
+    xl = pd.ExcelFile(io.BytesIO(contenido))
+    hojas = {s.upper(): s for s in xl.sheet_names}
+    inf = xl.parse(hojas["INFORMES"]) if "INFORMES" in hojas else pd.DataFrame(columns=COLS_INF)
+    ent = xl.parse(hojas["ENTREGAS"]) if "ENTREGAS" in hojas else pd.DataFrame(columns=COLS_ENT)
+    plan = xl.parse(hojas["PLAN"]) if "PLAN" in hojas else pd.DataFrame(columns=COLS_PLAN)
+    notas = xl.parse(hojas["NOTAS"]).iloc[:, 0].dropna().astype(str).tolist() if "NOTAS" in hojas else []
+    inf, ent = sincronizar(inf, ent)
+    return inf, ent, std_plan(plan), notas
+
+
+# ════════════════════════════════════════════════════════════════════
+# EXPORTACIÓN
+# ════════════════════════════════════════════════════════════════════
+def _formatear_hoja(ws, df: pd.DataFrame):
+    from openpyxl.styles import Font, PatternFill
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+    for i, col in enumerate(df.columns, start=1):
+        largo = max([len(str(col))] + [len(str(v)) for v in df[col].head(300)])
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = min(max(11, largo + 2), 48)
+    for cell in ws[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="1F4E79")
+
+
+def a_excel(hojas: dict[str, pd.DataFrame]) -> bytes:
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl", datetime_format="DD/MM/YYYY", date_format="DD/MM/YYYY") as w:
+        for nombre, df in hojas.items():
+            df.to_excel(w, sheet_name=nombre, index=False)
+            _formatear_hoja(w.sheets[nombre], df)
+    return buf.getvalue()
+
+
+def excel_canonico(inf, ent, plan, notas) -> bytes:
+    return a_excel({"INFORMES": inf, "ENTREGAS": ent, "PLAN": plan,
+                    "NOTAS": pd.DataFrame({"Notas de conciliación": notas or [""]})})
+
+
+def excel_formato_seguimiento(inf, ent, plan, corte: pd.Timestamp, alcance: list[str]) -> bytes:
+    """Regenera el formato de trabajo habitual con valores recalculados."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    amarillo = PatternFill("solid", fgColor="FFFF00")
+    crema = PatternFill("solid", fgColor="FFFFCC")
+    neg = Font(bold=True)
+    wb = Workbook()
+    ini_log = ent["Fecha"].min() if len(ent) else corte
+
+    ws = wb.active
+    ws.title = "INFORMES G1 G2 G3"
+    for j, g in enumerate(GRUPOS):
+        col = 1 + j * 2
+        sub = inf[(inf["Grupo"] == g) & ((inf["Estado"] == "Pendiente") |
+                                         (inf["Fecha Entrega"] >= ini_log) | inf["Fecha Entrega"].isna())]
+        sub = sub.sort_values(["Adicional", "N° Informe"])
+        c = ws.cell(1, col, f"PENDIENTES AL {corte:%d/%m/%Y}\n{DESC_GRUPO[g].upper()}")
+        c.alignment = Alignment(wrap_text=True)
+        c.font = neg
+        ws.cell(2, col, g).font = neg
+        ws.cell(3, col, f"=COUNTA({ws.cell(4, col).column_letter}4:{ws.cell(4, col).column_letter}{max(4, 3 + len(sub))})").fill = crema
+        for i, (_, r) in enumerate(sub.iterrows(), start=4):
+            cc = ws.cell(i, col, r["Código"])
+            if r["Estado"] == "Entregado":
+                cc.fill = amarillo
+        ws.column_dimensions[ws.cell(1, col).column_letter].width = 42
+    ws.row_dimensions[1].height = 45
+    ws.cell(3, 8, "Leyenda").font = neg
+    ws.cell(4, 8).fill = amarillo
+    ws.cell(4, 9, "Informe Entregado")
+
+    w3 = wb.create_sheet("PENDIENTES G3")
+    w3.cell(1, 1, "Pendientes con restricción").font = neg
+    for j, h in enumerate(["CÓDIGO", "PLAN", "TAG / CIRCUITO", "RESTRICCIÓN"], start=1):
+        w3.cell(2, j, h).font = neg
+    p3 = inf[(inf["Estado"] == "Pendiente") & ((inf["Grupo"] == "G3") | inf["Restricción"].ne(""))]
+    for i, (_, r) in enumerate(p3.iterrows(), start=3):
+        for j, k in enumerate(["Código", "Plan", "TAG / Circuito", "Restricción"], start=1):
+            w3.cell(i, j, r[k])
+    for j, wdt in enumerate([42, 18, 26, 30], start=1):
+        w3.column_dimensions[w3.cell(1, j).column_letter].width = wdt
+
+    wp = wb.create_sheet("Plan de entrega")
+    wp.cell(1, 1, f"Plan de entrega de informes · alcance {' + '.join(alcance)}").font = neg
+    if len(plan):
+        d0 = plan["Fecha"].min() - pd.Timedelta(days=1)
+        b0 = int(backlog_en(inf[inf["Grupo"].isin(alcance)], d0))
+        reales = entregas_por_dia(inf[inf["Grupo"].isin(alcance)])
+        acp = b0
+        filas = ["Entregas proyectadas", "Backlog proyectado", "Entregas reales", "Backlog real"]
+        for i, t in enumerate(filas, start=4):
+            wp.cell(i, 1, t).font = neg
+        wp.cell(3, 1, f"Backlog inicial al {d0:%d/%m/%Y}: {b0}")
+        for j, (_, r) in enumerate(plan.iterrows(), start=2):
+            f = r["Fecha"]
+            wp.cell(3, j, f.to_pydatetime()).number_format = "DD/MM"
+            acp = max(0, acp - r["Meta Diaria"])
+            wp.cell(4, j, r["Meta Diaria"])
+            wp.cell(5, j, round(acp, 2))
+            if f <= corte:
+                wp.cell(6, j, int(reales.get(f, 0)))
+                wp.cell(7, j, backlog_en(inf[inf["Grupo"].isin(alcance)], f))
+        wp.column_dimensions["A"].width = 26
+        wp.cell(9, 1, "Backlog real incluye informes incorporados al alcance después de la línea base. "
+                      "Entregas sin detalle diario se muestran en su fecha referencial de corte.")
+
+    wa = wb.create_sheet("Avance Diario")
+    wa.cell(1, 2, "Detalle de entregas diarias").font = neg
+    for j, h in enumerate(["FECHA", "CODIGO", "GRUPO", "GP_AD"], start=2):
+        wa.cell(3, j, h).font = neg
+    prev = None
+    for i, (_, r) in enumerate(ent.iterrows(), start=4):
+        c = wa.cell(i, 2, r["Fecha"].to_pydatetime())
+        c.number_format = "DD/MM/YYYY"
+        if r["Fecha"] != prev:
+            c.fill = amarillo
+            prev = r["Fecha"]
+        wa.cell(i, 3, int(r["N° Informe"]) if pd.notna(r["N° Informe"]) else r["Código"])
+        wa.cell(i, 4, r["Grupo"])
+        wa.cell(i, 5, r["Tipo (GP_AD)"])
+    wa.column_dimensions["B"].width = 13
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+# ════════════════════════════════════════════════════════════════════
+# PERSISTENCIA
 # ════════════════════════════════════════════════════════════════════
 def _secret(*keys):
     try:
@@ -257,27 +590,8 @@ def _secret(*keys):
         for k in keys:
             v = v[k]
         return v
-    except Exception:
+    except Exception:  # noqa: BLE001
         return None
-
-
-def a_excel(df: pd.DataFrame, extras: dict[str, pd.DataFrame] | None = None) -> bytes:
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl", datetime_format="DD/MM/YYYY", date_format="DD/MM/YYYY") as w:
-        hojas = {SHEET: df, **(extras or {})}
-        for nombre, data in hojas.items():
-            data.to_excel(w, sheet_name=nombre, index=False)
-            ws = w.sheets[nombre]
-            ws.freeze_panes = "A2"
-            ws.auto_filter.ref = ws.dimensions
-            for i, col in enumerate(data.columns, start=1):
-                largo = max([len(str(col))] + [len(str(v)) for v in data[col].head(300)])
-                ws.column_dimensions[ws.cell(1, i).column_letter].width = min(max(12, largo + 2), 45)
-            from openpyxl.styles import Font, PatternFill
-            for cell in ws[1]:
-                cell.font = Font(bold=True, color="FFFFFF")
-                cell.fill = PatternFill("solid", fgColor="1F4E79")
-    return buf.getvalue()
 
 
 def subir_github(contenido: bytes, mensaje: str) -> tuple[bool, str]:
@@ -291,28 +605,28 @@ def subir_github(contenido: bytes, mensaje: str) -> tuple[bool, str]:
     hdr = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"}
     try:
         r = requests.get(url, headers=hdr, params={"ref": rama}, timeout=20)
-        sha = r.json().get("sha") if r.status_code == 200 else None
         payload = {"message": mensaje, "content": base64.b64encode(contenido).decode(), "branch": rama}
-        if sha:
-            payload["sha"] = sha
+        if r.status_code == 200:
+            payload["sha"] = r.json().get("sha")
         r = requests.put(url, headers=hdr, json=payload, timeout=30)
         return r.status_code in (200, 201), f"GitHub respondió {r.status_code}"
     except Exception as e:  # noqa: BLE001
         return False, f"GitHub: {e}"
 
 
-def guardar(df: pd.DataFrame, motivo: str) -> None:
-    df = estandarizar(df)
-    st.session_state.df = df
-    st.session_state.origen = "archivo"
-    contenido = a_excel(df)
+def guardar(inf, ent, plan, motivo: str, notas: list[str] | None = None) -> None:
+    inf, ent = sincronizar(inf, ent)
+    plan = std_plan(plan)
+    notas = st.session_state.get("notas", []) if notas is None else notas
+    st.session_state.update(inf=inf, ent=ent, plan=plan, notas=notas)
+    contenido = excel_canonico(inf, ent, plan, notas)
     msgs = []
     try:
         DATA_DIR.mkdir(exist_ok=True)
         DATA_FILE.write_bytes(contenido)
         msgs.append("✅ Matriz guardada en el servidor")
     except Exception as e:  # noqa: BLE001
-        msgs.append(f"⚠️ No se pudo escribir el archivo local: {e}")
+        msgs.append(f"⚠️ No se pudo escribir el archivo: {e}")
     ok, info = subir_github(contenido, f"{motivo} · {datetime.now(TZ):%d/%m/%Y %H:%M}")
     if ok:
         msgs.append("✅ Respaldo sincronizado en GitHub")
@@ -322,283 +636,14 @@ def guardar(df: pd.DataFrame, motivo: str) -> None:
     st.session_state.flash = f"**{motivo}** · " + " · ".join(msgs)
 
 
-# ════════════════════════════════════════════════════════════════════
-# DATOS DE DEMOSTRACIÓN (solo si no existe matriz)
-# ════════════════════════════════════════════════════════════════════
-def datos_demo(n: int = 240, seed: int = 11) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    hoy = pd.Timestamp(hoy_lima())
-    inicio = hoy - pd.Timedelta(days=270)
-    esp_p = {"END": .30, "Estáticos": .24, "Dinámicos": .15, "Instrumentación": .15, "Electricidad": .10, "SSOMA": .06}
-    tipo_por_esp = {"END": "Informe END", "Estáticos": "Informe Técnico", "Dinámicos": "Informe Técnico",
-                    "Instrumentación": "Informe de Calibración", "Electricidad": "Informe Técnico", "SSOMA": "Informe SSOMA"}
-    lt_base = {"END": 4.0, "Estáticos": 5.5, "Dinámicos": 4.5, "Instrumentación": 3.5, "Electricidad": 4.0, "SSOMA": 3.0}
-    unidades = ["U-02 Destilación", "U-21", "U-23", "Conversión", "Servicios Industriales", "Tanques y Terminal"]
-    causas_p = [.30, .22, .18, .12, .10, .05, .02, .01]
-    filas = []
-    for i in range(n):
-        esp = rng.choice(list(esp_p), p=list(esp_p.values()))
-        ejec = np.busday_offset((inicio + pd.Timedelta(days=int(rng.integers(0, 268)))).date(), 0,
-                                roll="forward", holidays=HOL)
-        avance = (pd.Timestamp(ejec) - inicio).days / 270          # mejora gradual en el tiempo
-        lt = max(1, int(round(rng.gamma(4, lt_base[esp] / 4) * (1.15 - .35 * avance))))
-        entrega = pd.Timestamp(np.busday_offset(ejec, lt, holidays=HOL))
-        rev = int(rng.choice([0, 1, 2, 3], p=[.64, .23, .10, .03]))
-        if entrega > hoy or rng.random() < .05:
-            f_ent, estado = pd.NaT, rng.choice(["Pendiente", "En elaboración", "En revisión"])
-        else:
-            f_ent, estado = entrega, ("Observado" if rev > 1 else rng.choice(["Entregado", "Aprobado"], p=[.4, .6]))
-        causa = rng.choice(CAUSAS, p=causas_p) if (pd.notna(f_ent) and lt > 5) else ""
-        filas.append({
-            "ID": f"INF-{i + 1:04d}", "N° OT": f"OT-{4500100 + i}", "Especialidad": esp,
-            "Tipo de Informe": tipo_por_esp[esp], "Unidad / Área": rng.choice(unidades),
-            "Equipo / TAG": f"{rng.choice(['E', 'P', 'V', 'T', 'PSV'])}-{rng.integers(100, 999)}",
-            "Responsable": f"{esp} · Resp. {rng.integers(1, 4)}", "Fecha Ejecución": pd.Timestamp(ejec),
-            "Fecha Compromiso": pd.NaT, "Fecha Entrega": f_ent, "Estado": estado,
-            "N° Revisiones": rev if pd.notna(f_ent) else 0, "Causa de Retraso": causa, "Observaciones": "",
-        })
-    return estandarizar(pd.DataFrame(filas))
-
-
-def cargar_inicial() -> tuple[pd.DataFrame, str]:
+def cargar_inicial():
     if DATA_FILE.exists():
         try:
-            return desde_crudo(pd.read_excel(DATA_FILE, sheet_name=0)), "archivo"
+            return importar_canonico(DATA_FILE.read_bytes())
         except Exception:  # noqa: BLE001
             pass
-    return datos_demo(), "demo"
-
-
-# ════════════════════════════════════════════════════════════════════
-# CÁLCULO DE INDICADORES
-# ════════════════════════════════════════════════════════════════════
-def calcular(df: pd.DataFrame, plazo: int, habiles: bool, hoy: date) -> pd.DataFrame:
-    d = df[df["Estado"] != "Anulado"].copy()
-    lim = d["Fecha Compromiso"].copy()
-    sin = lim.isna()
-    lim.loc[sin] = sumar_dias(d.loc[sin, "Fecha Ejecución"], plazo, habiles)
-    d["Fecha Límite"] = lim
-    d["Entregado"] = d["Fecha Entrega"].notna()
-    d["Lead Time"] = dias_entre(d["Fecha Ejecución"], d["Fecha Entrega"], habiles)
-    d["Desviación"] = dias_entre(d["Fecha Límite"], d["Fecha Entrega"], habiles)
-    hoy_s = pd.Series(pd.Timestamp(hoy), index=d.index)
-    d["Días Vencido"] = dias_entre(d["Fecha Límite"], hoy_s, habiles).where(~d["Entregado"]).clip(lower=0)
-    d["Antigüedad"] = dias_entre(d["Fecha Ejecución"], hoy_s, habiles).where(~d["Entregado"])
-    d["A Tiempo"] = (d["Desviación"] <= 0).astype(float).where(d["Entregado"] & d["Fecha Límite"].notna())
-    d["Sin Revisión"] = (d["N° Revisiones"] == 0).astype(float).where(d["Entregado"])
-    d["Situación"] = np.select(
-        [d["Entregado"] & (d["A Tiempo"] == 1), d["Entregado"] & (d["A Tiempo"] == 0), d["Entregado"],
-         ~d["Entregado"] & (d["Días Vencido"] > 0)],
-        ["Entregado a tiempo", "Entregado fuera de plazo", "Entregado (sin plazo)", "Pendiente vencido"],
-        default="Pendiente en plazo",
-    )
-    d["Mes Entrega"] = d["Fecha Entrega"].dt.strftime("%Y-%m")
-    d["Mes Ejecución"] = d["Fecha Ejecución"].dt.strftime("%Y-%m")
-    d["Especialidad"] = d["Especialidad"].replace("", "Sin especialidad")
-    d["Responsable"] = d["Responsable"].replace("", "Sin responsable")
-    d["Unidad / Área"] = d["Unidad / Área"].replace("", "Sin unidad")
-    return d
-
-
-def estilo(fig: go.Figure, h: int = 380, titulo: str | None = None) -> go.Figure:
-    fig.update_layout(
-        template="plotly_white", height=h, margin=dict(l=10, r=10, t=55 if titulo else 25, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
-        font=dict(family="Segoe UI, Arial, sans-serif", size=12),
-        title=dict(text=titulo, font=dict(size=15, color=AZUL)) if titulo else None,
-    )
-    return fig
-
-
-def mostrar(fig: go.Figure) -> None:
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
-
-
-def sin_datos(msg: str = "No hay datos suficientes para este gráfico con los filtros actuales.") -> None:
-    st.info(msg, icon="ℹ️")
-
-
-def hallazgos(d: pd.DataFrame, meta: float) -> list[str]:
-    ent = d[d["A Tiempo"].notna()]
-    out = []
-    if len(ent):
-        otd = ent["A Tiempo"].mean() * 100
-        icon = "✅" if otd >= meta else "⚠️"
-        out.append(f"{icon} Cumplimiento de plazo global de **{otd:.1f}%** frente a una meta de {meta:.0f}% "
-                   f"({'+' if otd >= meta else ''}{otd - meta:.1f} pp).")
-        esp = ent.groupby("Especialidad")["A Tiempo"].agg(["mean", "count"])
-        esp = esp[esp["count"] >= 3]
-        if len(esp) > 1:
-            w = esp["mean"].idxmin()
-            out.append(f"🎯 La especialidad con menor cumplimiento es **{w}** ({esp.loc[w, 'mean'] * 100:.0f}%, "
-                       f"n={int(esp.loc[w, 'count'])}); se recomienda priorizarla en el análisis de causa raíz.")
-        meses = ent.groupby("Mes Entrega")["A Tiempo"].mean().sort_index() * 100
-        if len(meses) >= 6:
-            ult, ant = meses.iloc[-3:].mean(), meses.iloc[-6:-3].mean()
-            tend = "mejora" if ult > ant else "deterioro"
-            out.append(f"📈 Tendencia trimestral: **{tend}** del OTD ({ant:.0f}% → {ult:.0f}%) "
-                       f"comparando los últimos 3 meses con los 3 anteriores.")
-        tarde = ent[ent["A Tiempo"] == 0]
-        if len(tarde):
-            c = tarde["Causa de Retraso"].replace("", "Sin causa registrada").value_counts(normalize=True)
-            out.append(f"🔍 Principal causa de retraso: **{c.index[0]}** ({c.iloc[0] * 100:.0f}% de los informes "
-                       f"fuera de plazo).")
-            if (tarde["Causa de Retraso"] == "").mean() > .2:
-                out.append("📝 Más del 20% de los retrasos no tiene causa registrada; completar este campo "
-                           "fortalece el análisis de Pareto.")
-        fpy = d["Sin Revisión"].mean() * 100
-        if not np.isnan(fpy):
-            out.append(f"🧾 El {fpy:.0f}% de los informes se aprueba sin revisiones (FPY).")
-    pend = d[~d["Entregado"]]
-    venc = pend[pend["Días Vencido"] > 0]
-    if len(venc):
-        out.append(f"⏰ **{len(venc)}** informe(s) pendiente(s) vencido(s); el más antiguo acumula "
-                   f"{int(venc['Días Vencido'].max())} días de atraso.")
-    elif len(pend):
-        out.append(f"🟦 {len(pend)} informe(s) pendiente(s), todos dentro del plazo.")
-    return out
-
-
-# ════════════════════════════════════════════════════════════════════
-# COMPONENTES DE GESTIÓN DE LA MATRIZ
-# ════════════════════════════════════════════════════════════════════
-def form_registro(prefix: str) -> None:
-    if not puede_editar():
-        st.warning("🔒 Ingrese la clave de edición en la barra lateral para registrar informes.")
-        return
-    df = st.session_state.df
-    k = lambda n: f"{prefix}_{n}"  # noqa: E731
-    resp_exist = sorted(v for v in df["Responsable"].unique() if v)
-    with st.form(k("form"), clear_on_submit=True):
-        c1, c2, c3 = st.columns(3)
-        ot = c1.text_input("N° OT", key=k("ot"))
-        esp = c2.selectbox("Especialidad *", opciones(df, "Especialidad", ESPECIALIDADES), key=k("esp"))
-        tipo = c3.selectbox("Tipo de Informe", opciones(df, "Tipo de Informe", TIPOS), key=k("tipo"))
-        c4, c5, c6 = st.columns(3)
-        unidad = c4.text_input("Unidad / Área", key=k("uni"))
-        tag = c5.text_input("Equipo / TAG", key=k("tag"))
-        resp_sel = c6.selectbox("Responsable", ["—"] + resp_exist, key=k("resp"))
-        c7, c8, c9 = st.columns(3)
-        f_ej = c7.date_input("Fecha Ejecución *", value=hoy_lima(), format="DD/MM/YYYY", key=k("fej"))
-        f_co = c8.date_input("Fecha Compromiso (opcional)", value=None, format="DD/MM/YYYY", key=k("fco"),
-                             help="Si se deja vacía se calcula con el plazo estándar configurado.")
-        f_en = c9.date_input("Fecha Entrega", value=None, format="DD/MM/YYYY", key=k("fen"))
-        c10, c11, c12 = st.columns(3)
-        estado = c10.selectbox("Estado", ESTADOS, key=k("est"))
-        rev = c11.number_input("N° Revisiones", min_value=0, max_value=30, value=0, step=1, key=k("rev"))
-        causa = c12.selectbox("Causa de Retraso", [""] + opciones(df, "Causa de Retraso", CAUSAS), key=k("cau"))
-        c13, c14 = st.columns([1, 2])
-        resp_new = c13.text_input("…o registrar nuevo responsable", key=k("respn"))
-        obs = c14.text_input("Observaciones", key=k("obs"))
-        enviar = st.form_submit_button("💾 Registrar informe", type="primary")
-    if enviar:
-        errores = []
-        if f_en and f_ej and f_en < f_ej:
-            errores.append("La fecha de entrega no puede ser anterior a la fecha de ejecución.")
-        if estado in ("Entregado", "Observado", "Aprobado") and not f_en:
-            errores.append(f"El estado «{estado}» requiere registrar la Fecha Entrega.")
-        if errores:
-            for e in errores:
-                st.error(e)
-            return
-        if f_en and estado in ("Pendiente", "En elaboración", "En revisión"):
-            estado = "Entregado"
-        nuevo_id = siguiente_id(df)[0]
-        fila = {
-            "ID": nuevo_id, "N° OT": ot, "Especialidad": esp, "Tipo de Informe": tipo, "Unidad / Área": unidad,
-            "Equipo / TAG": tag, "Responsable": resp_new.strip() or ("" if resp_sel == "—" else resp_sel),
-            "Fecha Ejecución": pd.Timestamp(f_ej) if f_ej else pd.NaT,
-            "Fecha Compromiso": pd.Timestamp(f_co) if f_co else pd.NaT,
-            "Fecha Entrega": pd.Timestamp(f_en) if f_en else pd.NaT, "Estado": estado,
-            "N° Revisiones": int(rev), "Causa de Retraso": causa, "Observaciones": obs,
-        }
-        guardar(pd.concat([df, pd.DataFrame([fila])], ignore_index=True), f"Registro {nuevo_id} añadido")
-        st.rerun()
-
-
-def carga_matriz(prefix: str, compacto: bool = False) -> None:
-    if not puede_editar():
-        st.warning("🔒 Ingrese la clave de edición en la barra lateral para subir una matriz.")
-        return
-    up = st.file_uploader("Matriz actualizada (.xlsx, .xlsm o .csv)", type=["xlsx", "xlsm", "csv"], key=f"{prefix}_up")
-    if not up:
-        return
-    try:
-        crudo = up.getvalue()
-        c1, c2 = st.columns(2) if not compacto else (st.container(), st.container())
-        fila_hdr = c2.number_input("Fila de encabezados", 1, 30, 1, key=f"{prefix}_hdr")
-        if up.name.lower().endswith(".csv"):
-            raw = pd.read_csv(io.BytesIO(crudo), sep=None, engine="python", header=fila_hdr - 1,
-                              encoding_errors="replace")
-        else:
-            xl = pd.ExcelFile(io.BytesIO(crudo))
-            idx = next((i for i, s in enumerate(xl.sheet_names) if "matriz" in s.lower()), 0)
-            hoja = c1.selectbox("Hoja", xl.sheet_names, index=idx, key=f"{prefix}_hoja")
-            raw = xl.parse(hoja, header=fila_hdr - 1)
-        raw = raw.dropna(how="all").dropna(axis=1, how="all")
-        raw.columns = [str(c).strip() for c in raw.columns]
-    except Exception as e:  # noqa: BLE001
-        st.error(f"No se pudo leer el archivo: {e}")
-        return
-
-    auto = mapeo_automatico(raw.columns)
-    faltan = [c for c in ["Especialidad", "Fecha Ejecución", "Fecha Entrega"] if c not in auto]
-    NO = "— (no disponible)"
-    mapa = {}
-    with st.expander(f"🔗 Mapeo de columnas ({len(auto)}/{len(COLUMNS)} reconocidas)", expanded=bool(faltan)):
-        cols = st.columns(2)
-        for i, std in enumerate(COLUMNS):
-            ops = [NO] + list(raw.columns)
-            sel = cols[i % 2].selectbox(std, ops, index=ops.index(auto[std]) if std in auto else 0,
-                                        key=f"{prefix}_map_{i}")
-            if sel != NO:
-                mapa[std] = sel
-    if faltan:
-        st.warning("Columnas clave no reconocidas automáticamente: " + ", ".join(faltan) +
-                   ". Asígnelas en el mapeo para calcular los KPI correctamente.")
-    modo = st.radio("Modo de carga", ["Reemplazar matriz completa", "Anexar / actualizar por ID"],
-                    key=f"{prefix}_modo", horizontal=not compacto,
-                    help="«Anexar» agrega registros nuevos y actualiza los que tengan el mismo ID.")
-    nueva = desde_crudo(raw, mapa)
-    st.caption(f"Vista previa: {len(nueva)} registros válidos")
-    st.dataframe(nueva.head(8), use_container_width=True, hide_index=True)
-    if st.button("✅ Confirmar carga", type="primary", key=f"{prefix}_ok"):
-        if modo.startswith("Reemplazar"):
-            final, motivo = nueva, f"Matriz reemplazada ({len(nueva)} registros)"
-        else:
-            final = pd.concat([st.session_state.df, nueva], ignore_index=True)
-            final = final.drop_duplicates(subset="ID", keep="last")
-            motivo = f"Matriz anexada/actualizada ({len(nueva)} registros procesados)"
-        guardar(final, motivo)
-        st.rerun()
-
-
-def editor_matriz() -> None:
-    if not puede_editar():
-        st.warning("🔒 Ingrese la clave de edición en la barra lateral para modificar la matriz.")
-        st.dataframe(st.session_state.df, use_container_width=True, hide_index=True)
-        return
-    df = st.session_state.df
-    st.caption("Edite directamente las celdas. Para agregar filas use la última fila vacía; para eliminar, "
-               "seleccione la fila (casilla izquierda) y presione Supr. Luego pulse **Guardar cambios**.")
-    cfg = {
-        "ID": st.column_config.TextColumn("ID", help="Se autogenera si se deja vacío"),
-        "Especialidad": st.column_config.SelectboxColumn(options=opciones(df, "Especialidad", ESPECIALIDADES)),
-        "Tipo de Informe": st.column_config.SelectboxColumn(options=opciones(df, "Tipo de Informe", TIPOS)),
-        "Estado": st.column_config.SelectboxColumn(options=ESTADOS),
-        "Causa de Retraso": st.column_config.SelectboxColumn(options=[""] + opciones(df, "Causa de Retraso", CAUSAS)),
-        "N° Revisiones": st.column_config.NumberColumn(min_value=0, step=1),
-        **{c: st.column_config.DateColumn(c, format="DD/MM/YYYY") for c in DATE_COLS},
-    }
-    editado = st.data_editor(df, num_rows="dynamic", use_container_width=True, hide_index=True,
-                             column_config=cfg, key="editor_matriz", height=520)
-    c1, c2, _ = st.columns([1, 1, 3])
-    if c1.button("💾 Guardar cambios", type="primary", key="btn_guardar_editor"):
-        guardar(editado, "Matriz actualizada desde el editor")
-        st.rerun()
-    if c2.button("↩️ Descartar cambios", key="btn_descartar"):
-        st.session_state.pop("editor_matriz", None)
-        st.rerun()
+    return (std_inf(pd.DataFrame(columns=COLS_INF)), std_ent(pd.DataFrame(columns=COLS_ENT)),
+            std_plan(pd.DataFrame(columns=COLS_PLAN)), [])
 
 
 def puede_editar() -> bool:
@@ -606,412 +651,620 @@ def puede_editar() -> bool:
 
 
 # ════════════════════════════════════════════════════════════════════
+# CÁLCULOS DE KPI
+# ════════════════════════════════════════════════════════════════════
+def backlog_en(inf_s: pd.DataFrame, t: pd.Timestamp) -> int:
+    ing = inf_s["Fecha Ingreso"]
+    fe = inf_s["Fecha Entrega"]
+    entregado_t = inf_s["Estado"].eq("Entregado") & (fe.isna() | (fe <= t))
+    return int(((ing.isna() | (ing <= t)) & ~entregado_t).sum())
+
+
+def entregas_por_dia(inf_s: pd.DataFrame) -> pd.Series:
+    e = inf_s[inf_s["Estado"].eq("Entregado") & inf_s["Fecha Entrega"].notna()]
+    return e.groupby("Fecha Entrega").size()
+
+
+def serie_real(inf_s: pd.DataFrame, desde: pd.Timestamp, corte: pd.Timestamp) -> pd.DataFrame:
+    ev = set(inf_s["Fecha Ingreso"].dropna()) | set(inf_s["Fecha Entrega"].dropna())
+    ev = sorted({desde, corte} | {d for d in ev if desde < d <= corte})
+    return pd.DataFrame({"Fecha": ev, "Pendientes": [backlog_en(inf_s, t) for t in ev]})
+
+
+def serie_plan(plan: pd.DataFrame, b0: float) -> pd.DataFrame:
+    if not len(plan):
+        return pd.DataFrame(columns=["Fecha", "Plan"])
+    d0 = plan["Fecha"].min() - pd.Timedelta(days=1)
+    acum = (b0 - plan["Meta Diaria"].cumsum()).clip(lower=0)
+    return pd.DataFrame({"Fecha": [d0] + plan["Fecha"].tolist(), "Plan": [b0] + acum.tolist()})
+
+
+def kpis(inf, ent, plan, alcance, corte, n_vel):
+    s = inf[inf["Grupo"].isin(alcance)]
+    r = {"total": len(s), "entregados": int((s["Estado"] == "Entregado").sum())}
+    r["pendientes"] = backlog_en(s, corte)
+    r["avance"] = r["entregados"] / r["total"] * 100 if r["total"] else np.nan
+    d0 = plan["Fecha"].min() - pd.Timedelta(days=1) if len(plan) else (s["Fecha Ingreso"].min() if len(s) else corte)
+    r["d0"], r["b0"] = d0, backlog_en(s, d0) if pd.notna(d0) else r["total"]
+    fe = s["Fecha Entrega"]
+    r["real_acum"] = int((s["Estado"].eq("Entregado") & (fe > d0) & (fe <= corte)).sum())
+    r["plan_acum"] = float(plan.loc[(plan["Fecha"] > d0) & (plan["Fecha"] <= corte), "Meta Diaria"].sum()) if len(plan) else np.nan
+    r["spi"] = r["real_acum"] / r["plan_acum"] * 100 if r["plan_acum"] else np.nan
+    pl = serie_plan(plan, r["b0"])
+    fin = pl[pl["Plan"] <= 0.001]["Fecha"]
+    r["fin_plan"] = fin.min() if len(fin) else (plan["Fecha"].max() if len(plan) else pd.NaT)
+    # velocidad: primeras entregas del alcance registradas en el log, últimos n días hábiles
+    ini = pd.Timestamp(np.busday_offset(np.datetime64(corte.date()), -(n_vel - 1), roll="backward", holidays=HOL))
+    cods = set(s["Código"])
+    prim = ent[ent["Código"].isin(cods)].sort_values("Fecha").drop_duplicates("Código")
+    r["vel"] = len(prim[(prim["Fecha"] >= ini) & (prim["Fecha"] <= corte)]) / n_vel
+    r["vel_ini"] = ini
+    if r["vel"] > 0 and r["pendientes"] > 0:
+        dias = math.ceil(r["pendientes"] / r["vel"])
+        r["cierre"] = pd.Timestamp(np.busday_offset(np.datetime64(corte.date()), dias, roll="forward", holidays=HOL))
+    elif r["pendientes"] == 0:
+        r["cierre"] = corte
+    else:
+        r["cierre"] = pd.NaT
+    r["meta_prom"] = float(plan.loc[plan["Meta Diaria"] >= 1, "Meta Diaria"].tail(15).median()) if len(plan) else np.nan
+    r["crec_alcance"] = int(((s["Fecha Ingreso"] > d0) & (s["Fecha Ingreso"] <= corte)).sum()) if pd.notna(d0) else 0
+    return r
+
+
+def calidad(inf, ent, plan) -> dict[str, pd.DataFrame]:
+    gm = inf.set_index("Código")["Grupo"]
+    out = {}
+    dup = ent[ent.duplicated("Código", keep=False)].sort_values(["Código", "Fecha"])
+    out["Reentregas (mismo informe registrado más de una vez)"] = dup
+    e = ent.assign(**{"Grupo en maestro": ent["Código"].map(gm)})
+    out["Grupo del registro diario ≠ grupo en listas"] = e[e["Grupo"].ne(e["Grupo en maestro"]) & e["Grupo"].ne("")]
+    out["Incorporados desde el registro diario (no figuraban en listas)"] = inf[inf["Observaciones"].str.startswith("Incorporado")]
+    out["Entregados con fecha referencial (sin detalle diario)"] = inf[inf["Observaciones"].str.contains("referencial")]
+    out["Pendientes G3 sin restricción registrada"] = inf[(inf["Grupo"] == "G3") & (inf["Estado"] == "Pendiente") & inf["Restricción"].eq("")]
+    if len(plan):
+        p = plan.copy()
+        p["Día"] = p["Fecha"].dt.day_name(locale=None)
+        p["Hábil"] = p["Fecha"].map(es_habil)
+        out["Plan con meta en feriado / fin de semana"] = p[(p["Meta Diaria"] > 0) & ~p["Hábil"]][["Fecha", "Meta Diaria"]]
+    return out
+
+
+# ════════════════════════════════════════════════════════════════════
+# GRÁFICOS
+# ════════════════════════════════════════════════════════════════════
+def estilo(fig: go.Figure, h: int = 380, titulo: str | None = None) -> go.Figure:
+    fig.update_layout(template="plotly_white", height=h, margin=dict(l=10, r=10, t=60 if titulo else 25, b=10),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
+                      font=dict(family="Segoe UI, Arial, sans-serif", size=12),
+                      title=dict(text=titulo, font=dict(size=15, color=AZUL)) if titulo else None)
+    return fig
+
+
+def mostrar(fig):
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+
+
+def sin_datos(msg="No hay datos suficientes para este gráfico."):
+    st.info(msg, icon="ℹ️")
+
+
+def fig_burndown(inf_s, plan, k, corte, titulo):
+    fig = go.Figure()
+    pl = serie_plan(plan, k["b0"])
+    if len(pl):
+        fig.add_scatter(x=pl["Fecha"], y=pl["Plan"], name="Plan", mode="lines",
+                        line=dict(color=GRIS, width=2.5, dash="dash"))
+    desde = k["d0"] if pd.notna(k["d0"]) else inf_s["Fecha Ingreso"].min()
+    rl = serie_real(inf_s, desde, corte)
+    fig.add_scatter(x=rl["Fecha"], y=rl["Pendientes"], name="Real", mode="lines+markers",
+                    line=dict(color=AZUL, width=3), marker=dict(size=7),
+                    hovertemplate="%{x|%d/%m}: %{y} pendientes<extra></extra>")
+    fig.add_annotation(x=rl["Fecha"].iloc[-1], y=rl["Pendientes"].iloc[-1], text=f"<b>{rl['Pendientes'].iloc[-1]}</b>",
+                       showarrow=False, yshift=14, font=dict(color=AZUL))
+    if pd.notna(k["cierre"]) and k["pendientes"] > 0:
+        fig.add_scatter(x=[corte, k["cierre"]], y=[k["pendientes"], 0], mode="lines+markers",
+                        name=f"Proyección al ritmo actual ({k['vel']:.1f}/día)",
+                        line=dict(color=NARANJA, width=2, dash="dot"))
+    fig.add_vline(x=corte, line_color="#17202A", line_width=1, line_dash="dot")
+    fig.update_layout(yaxis_title="Informes pendientes", xaxis_title=None, hovermode="x unified")
+    fig.update_xaxes(tickformat="%d/%m")
+    return estilo(fig, 400, titulo)
+
+
+# ════════════════════════════════════════════════════════════════════
+# FORMULARIOS
+# ════════════════════════════════════════════════════════════════════
+def form_entregas(prefix: str, corte: pd.Timestamp):
+    if not puede_editar():
+        st.warning("🔒 Ingrese la clave de edición en la barra lateral para registrar entregas.")
+        return
+    inf, ent = st.session_state.inf, st.session_state.ent
+    reent = st.checkbox("Incluir informes ya entregados (registrar reentrega)", key=f"{prefix}_reent")
+    base = inf if reent else inf[inf["Estado"] == "Pendiente"]
+    etiqueta = {r["Código"]: f"{int(r['N° Informe']) if pd.notna(r['N° Informe']) else ''} · {r['Grupo']} · "
+                f"{r['Código'].replace(PREFIJO + '-', '')}" + (f" · {r['TAG / Circuito']}" if r["TAG / Circuito"] else "")
+                for _, r in base.iterrows()}
+    tipos = sorted(set(TIPOS_GPAD) | set(ent["Tipo (GP_AD)"].unique()) - {""})
+    with st.form(f"{prefix}_fe", clear_on_submit=True):
+        c1, c2 = st.columns([1, 3])
+        fecha = c1.date_input("Fecha de entrega", value=hoy_lima(), format="DD/MM/YYYY", key=f"{prefix}_f")
+        cods = c2.multiselect("Informes entregados (escriba el N° para buscar)", list(etiqueta),
+                              format_func=lambda c: etiqueta[c], key=f"{prefix}_c")
+        c3, c4 = st.columns([1, 3])
+        tipo = c3.selectbox("Tipo (GP_AD)", tipos, key=f"{prefix}_t")
+        obs = c4.text_input("Observaciones", key=f"{prefix}_o")
+        ok = st.form_submit_button("📬 Registrar entregas", type="primary")
+    if ok:
+        if not cods:
+            st.error("Seleccione al menos un informe.")
+            return
+        gm = inf.set_index("Código")["Grupo"]
+        nuevas = pd.DataFrame([{"Fecha": pd.Timestamp(fecha), "N° Informe": numero_de(c), "Código": c,
+                                "Grupo": gm.get(c, ""), "Tipo (GP_AD)": tipo, "Observaciones": obs} for c in cods])
+        guardar(inf, pd.concat([ent, nuevas], ignore_index=True), st.session_state.plan,
+                f"{len(cods)} entrega(s) registradas el {fecha:%d/%m/%Y}")
+        st.rerun()
+
+
+def form_informe(prefix: str):
+    if not puede_editar():
+        st.warning("🔒 Ingrese la clave de edición en la barra lateral para añadir informes.")
+        return
+    inf = st.session_state.inf
+    with st.form(f"{prefix}_fi", clear_on_submit=True):
+        c1, c2, c3, c4 = st.columns([1, 1, 1, 1])
+        n = c1.number_input("N° de informe *", min_value=1, step=1, value=None, key=f"{prefix}_n")
+        adic = c2.selectbox("Adicional", ["No", "Sí"], key=f"{prefix}_a")
+        grupo = c3.selectbox("Grupo *", GRUPOS, key=f"{prefix}_g")
+        f_ing = c4.date_input("Fecha de ingreso al backlog", value=hoy_lima(), format="DD/MM/YYYY", key=f"{prefix}_fi")
+        c5, c6, c7 = st.columns(3)
+        plan = c5.selectbox("Plan", [""] + sorted(set(PLANES) | set(inf["Plan"]) - {""}), key=f"{prefix}_p")
+        tag = c6.text_input("TAG / Circuito", key=f"{prefix}_tag")
+        restr = c7.selectbox("Restricción (si aplica)", [""] + sorted(set(RESTRICCIONES) | set(inf["Restricción"]) - {""}),
+                             key=f"{prefix}_r")
+        obs = st.text_input("Observaciones", key=f"{prefix}_ob")
+        ok = st.form_submit_button("➕ Añadir al backlog", type="primary")
+    if ok:
+        if not n:
+            st.error("Ingrese el N° de informe.")
+            return
+        cod = construir_codigo(n, f_ing.year, adic == "Sí")
+        if cod in set(inf["Código"]):
+            st.error(f"El informe {cod} ya existe en la matriz.")
+            return
+        fila = {"Código": cod, "Grupo": grupo, "Plan": plan, "TAG / Circuito": tag, "Restricción": restr,
+                "Fecha Ingreso": pd.Timestamp(f_ing), "Estado": "Pendiente", "Observaciones": obs}
+        guardar(pd.concat([inf, pd.DataFrame([fila])], ignore_index=True), st.session_state.ent,
+                st.session_state.plan, f"Informe {cod} añadido a {grupo}")
+        st.rerun()
+
+
+def carga_matriz(prefix: str, compacto: bool = False):
+    if not puede_editar():
+        st.warning("🔒 Ingrese la clave de edición en la barra lateral para subir una matriz.")
+        return
+    up = st.file_uploader("Matriz (.xlsx) — formato original o exportado por este tablero", type=["xlsx", "xlsm"],
+                          key=f"{prefix}_up")
+    if not up:
+        return
+    contenido = up.getvalue()
+    try:
+        original = es_formato_original(contenido)
+        inf, ent, plan, notas = (importar_formato_original if original else importar_canonico)(contenido)
+    except Exception as e:  # noqa: BLE001
+        st.error(f"No se pudo interpretar el archivo: {e}")
+        return
+    st.caption(("Formato de seguimiento original detectado" if original else "Formato del tablero detectado") +
+               f" · {len(inf)} informes · {len(ent)} entregas diarias · {len(plan)} días de plan")
+    resumen = inf.groupby(["Grupo", "Estado"]).size().unstack(fill_value=0)
+    st.dataframe(resumen, use_container_width=True)
+    if notas:
+        with st.expander(f"📝 Notas de conciliación ({len(notas)})"):
+            for nt in notas:
+                st.markdown(f"- {nt}")
+    modo = st.radio("Modo de carga", ["Reemplazar matriz completa", "Actualizar / anexar"], key=f"{prefix}_modo",
+                    horizontal=not compacto,
+                    help="«Actualizar» agrega informes nuevos, actualiza los existentes por código, suma las "
+                         "entregas no registradas y reemplaza el plan en las fechas incluidas.")
+    if st.button("✅ Confirmar carga", type="primary", key=f"{prefix}_ok"):
+        if modo.startswith("Reemplazar"):
+            guardar(inf, ent, plan, "Matriz reemplazada", notas)
+        else:
+            s = st.session_state
+            i2 = pd.concat([s.inf, inf]).drop_duplicates("Código", keep="last")
+            e2 = pd.concat([s.ent, ent]).drop_duplicates(["Fecha", "Código"], keep="last")
+            p2 = pd.concat([s.plan, plan]).drop_duplicates("Fecha", keep="last")
+            guardar(i2, e2, p2, "Matriz actualizada por carga de archivo", list(dict.fromkeys(s.notas + notas)))
+        st.rerun()
+
+
+def acciones_rapidas(prefix: str, corte):
+    st.divider()
+    c1, c2 = st.columns(2)
+    with c1.expander("📬 Registrar entregas"):
+        form_entregas(prefix + "e", corte)
+    with c2.expander("➕ Añadir informe al backlog"):
+        form_informe(prefix + "i")
+
+
+# ════════════════════════════════════════════════════════════════════
 # ESTADO INICIAL
 # ════════════════════════════════════════════════════════════════════
-if "df" not in st.session_state:
-    st.session_state.df, st.session_state.origen = cargar_inicial()
-
-df_base: pd.DataFrame = st.session_state.df
-HOY = hoy_lima()
+if "inf" not in st.session_state:
+    st.session_state.inf, st.session_state.ent, st.session_state.plan, st.session_state.notas = cargar_inicial()
+INF, ENT, PLAN = st.session_state.inf, st.session_state.ent, st.session_state.plan
+HOY = pd.Timestamp(hoy_lima())
 
 # ════════════════════════════════════════════════════════════════════
-# BARRA LATERAL: PARÁMETROS, FILTROS Y ARCHIVO
+# BARRA LATERAL
 # ════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("### ⚙️ Parámetros del KPI")
-    meta = st.slider("Meta de cumplimiento de plazo (OTD)", 50, 100, 90, 1, format="%d%%")
-    plazo = st.number_input("Plazo estándar de entrega (días)", 1, 60, 5,
-                            help="Se usa cuando el registro no tiene Fecha Compromiso.")
-    habiles = st.toggle("Contar en días hábiles (excluye fines de semana y feriados Perú)", value=True)
+    st.markdown("### ⚙️ Parámetros")
+    corte_def = min(ENT["Fecha"].max(), HOY) if len(ENT) else HOY
+    corte = pd.Timestamp(st.date_input("Fecha de corte", value=corte_def.date(), format="DD/MM/YYYY",
+                                       help="Por defecto, la última fecha con entregas registradas."))
+    op_alc = {"G1 (plan de entrega)": ["G1"], "G1 + G2": ["G1", "G2"], "G1 + G2 + G3": GRUPOS}
+    alcance = op_alc[st.radio("Alcance del plan", list(op_alc), index=0)]
+    n_vel = st.slider("Ventana de productividad (días hábiles)", 3, 15, 5,
+                      help="Base para la velocidad actual y la fecha estimada de cierre.")
 
-    datos = calcular(df_base, int(plazo), habiles, HOY)
-
-    st.markdown("### 🔎 Filtros")
-    fechas_ok = datos["Fecha Ejecución"].dropna()
-    if len(fechas_ok):
-        fmin, fmax = fechas_ok.min().date(), max(fechas_ok.max().date(), HOY)
-        rango = st.date_input("Rango de Fecha Ejecución", (fmin, fmax), min_value=fmin, max_value=fmax,
-                              format="DD/MM/YYYY")
-    else:
-        rango = ()
-    f_esp = st.multiselect("Especialidad", sorted(datos["Especialidad"].unique()))
-    f_resp = st.multiselect("Responsable", sorted(datos["Responsable"].unique()))
-    f_uni = st.multiselect("Unidad / Área", sorted(datos["Unidad / Área"].unique()))
-    f_est = st.multiselect("Estado", [e for e in ESTADOS if e in datos["Estado"].unique()])
-
-    d = datos.copy()
-    if isinstance(rango, (tuple, list)) and len(rango) == 2:
-        ini, fin = pd.Timestamp(rango[0]), pd.Timestamp(rango[1])
-        d = d[d["Fecha Ejecución"].isna() | d["Fecha Ejecución"].between(ini, fin)]
-    for col, sel in [("Especialidad", f_esp), ("Responsable", f_resp), ("Unidad / Área", f_uni), ("Estado", f_est)]:
-        if sel:
-            d = d[d[col].isin(sel)]
-
-    st.markdown("### 📁 Matriz (archivo)")
-    if _secret("edicion", "password"):
-        if not st.session_state.get("editor_ok"):
-            clave = st.text_input("Clave de edición", type="password")
-            if clave and clave == _secret("edicion", "password"):
-                st.session_state.editor_ok = True
-                st.rerun()
-            elif clave:
-                st.error("Clave incorrecta")
-        else:
-            st.success("🔓 Edición habilitada")
+    st.markdown("### 📁 Matriz")
+    pwd = _secret("edicion", "password")
+    if pwd and not st.session_state.get("editor_ok"):
+        clave = st.text_input("Clave de edición", type="password")
+        if clave == pwd:
+            st.session_state.editor_ok = True
+            st.rerun()
+        elif clave:
+            st.error("Clave incorrecta")
+    elif pwd:
+        st.success("🔓 Edición habilitada")
     ts = st.session_state.get("ultimo_guardado")
-    st.caption(f"Registros en matriz: **{len(df_base)}**" + (f" · Último guardado: {ts:%d/%m/%Y %H:%M}" if ts else ""))
-    st.download_button("⬇️ Descargar matriz (.xlsx)", a_excel(df_base),
-                       file_name=f"MATRIZ_KPI_ENTREGA_INFORMES_{HOY:%Y%m%d}.xlsx", use_container_width=True,
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.caption(f"{len(INF)} informes · {len(ENT)} entregas registradas"
+               + (f" · guardado {ts:%d/%m %H:%M}" if ts else ""))
+    st.download_button("⬇️ Descargar matriz (.xlsx)", excel_canonico(INF, ENT, PLAN, st.session_state.notas),
+                       file_name=f"MATRIZ_KPI_ENTREGA_INFORMES_{HOY:%Y%m%d}.xlsx", use_container_width=True)
     with st.expander("⬆️ Subir matriz actualizada"):
         carga_matriz("sb", compacto=True)
 
 # ════════════════════════════════════════════════════════════════════
 # ENCABEZADO
 # ════════════════════════════════════════════════════════════════════
-st.markdown(
-    f"""<div class="hdr"><h1>📊 KPI · Entrega de Informes</h1>
-    <p>ADEMINSAC · Control de cumplimiento, tiempos de ciclo y mejora continua · Corte al {HOY:%d/%m/%Y}
-    · {'días hábiles' if habiles else 'días calendario'} · plazo estándar {plazo} d · meta OTD {meta}%</p></div>""",
-    unsafe_allow_html=True,
-)
+st.markdown(f"""<div class="hdr"><h1>📊 KPI · Entrega de Informes</h1>
+<p>ADEMINSAC · Contrato N° 3700002135 · Refinería La Pampilla · Corte al {corte:%d/%m/%Y} ·
+alcance del plan {' + '.join(alcance)}</p></div>""", unsafe_allow_html=True)
 if "flash" in st.session_state:
     st.success(st.session_state.pop("flash"))
-if st.session_state.origen == "demo":
-    st.warning("Se muestran **datos de demostración**. Suba su matriz desde la barra lateral o la pestaña "
-               "**Gestión de Matriz** para ver sus indicadores reales.", icon="🧪")
+if INF.empty:
+    st.info("Aún no hay datos. Suba la matriz **KPI_ENTREGA_DE_INFORMES.xlsx** (formato original) desde la barra lateral "
+            "o la pestaña **Gestión de Matriz**.", icon="📂")
+    carga_matriz("inicio")
+    st.stop()
 
-ent = d[d["A Tiempo"].notna()]
-pend = d[~d["Entregado"]]
+K = kpis(INF, ENT, PLAN, alcance, corte, n_vel)
+S = INF[INF["Grupo"].isin(alcance)]
+PEND = INF[INF["Estado"] == "Pendiente"].copy()
+PEND["Antigüedad (días háb.)"] = habiles_entre(PEND["Fecha Ingreso"], corte)
+RESTR = PEND[(PEND["Grupo"] == "G3") | PEND["Restricción"].ne("")]
+ENT_C = ENT[ENT["Fecha"] <= corte].copy()
+ENT_C["Grupo maestro"] = ENT_C["Código"].map(INF.set_index("Código")["Grupo"])
+ENT_C["Reentrega"] = ENT_C.duplicated("Código", keep="first")
+CAL = calidad(INF, ENT, PLAN)
+n_incons = sum(len(v) for k, v in CAL.items() if not k.startswith("Entregados con fecha"))
 
-tabs = st.tabs(["📊 Resumen Ejecutivo", "🎯 Cumplimiento", "⏱️ Tiempos y Estabilidad",
-                "🔧 Mejora Continua", "📋 Backlog y Alertas", "🗂️ Gestión de Matriz"])
-
-
-def expander_registro(prefix: str) -> None:
-    st.divider()
-    with st.expander("➕ Añadir registro a la matriz"):
-        form_registro(prefix)
-
+tabs = st.tabs(["📊 Resumen Ejecutivo", "📈 Avance y Productividad", "🚧 Backlog y Restricciones",
+                "🔍 Calidad de Datos", "🗂️ Gestión de Matriz"])
 
 # ─────────────────────────── 1. RESUMEN ───────────────────────────
 with tabs[0]:
-    otd = ent["A Tiempo"].mean() * 100 if len(ent) else np.nan
-    lt = d["Lead Time"].mean()
-    fpy = d["Sin Revisión"].mean() * 100
-    venc = int((pend["Días Vencido"] > 0).sum())
-    fmt = lambda v, s="": "—" if pd.isna(v) else f"{v:,.1f}{s}"  # noqa: E731
-
+    b_total = backlog_en(INF, corte)
+    b_prev = backlog_en(INF, corte - pd.Timedelta(days=7))
     c = st.columns(4)
-    c[0].metric("Informes registrados", f"{len(d):,}")
-    c[1].metric("Entregados", f"{int(d['Entregado'].sum()):,}",
-                f"{d['Entregado'].mean() * 100:.0f}% del total" if len(d) else None, delta_color="off")
-    c[2].metric("Cumplimiento de plazo (OTD)", fmt(otd, "%"),
-                None if pd.isna(otd) else f"{otd - meta:+.1f} pp vs meta")
-    c[3].metric("Lead time promedio", fmt(lt, " d"),
-                None if pd.isna(lt) else f"{lt - plazo:+.1f} d vs plazo", delta_color="inverse")
+    c[0].metric("Backlog pendiente (todos los grupos)", f"{b_total}", f"{b_total - b_prev:+d} vs hace 7 días",
+                delta_color="inverse")
+    c[1].metric(f"Avance {' + '.join(alcance)}", f"{K['avance']:.1f}%" if pd.notna(K["avance"]) else "—",
+                f"{K['entregados']} de {K['total']} entregados", delta_color="off")
+    c[2].metric("Cumplimiento del plan (real / plan acumulado)", f"{K['spi']:.0f}%" if pd.notna(K["spi"]) else "—",
+                f"{K['real_acum'] - K['plan_acum']:+.0f} informes vs plan" if pd.notna(K["spi"]) else None)
+    c[3].metric(f"Productividad (últimos {n_vel} días háb.)", f"{K['vel']:.1f} inf/día",
+                f"{K['vel'] - K['meta_prom']:+.1f} vs meta {K['meta_prom']:.0f}" if pd.notna(K["meta_prom"]) else None)
     c = st.columns(4)
-    c[0].metric("Pendientes", f"{len(pend):,}")
-    c[1].metric("Pendientes vencidos", f"{venc:,}",
-                f"{venc / len(pend) * 100:.0f}% del backlog" if len(pend) else None, delta_color="off")
-    c[2].metric("Aprobados sin revisión (FPY)", fmt(fpy, "%"))
-    c[3].metric("Desviación media vs plazo", fmt(ent["Desviación"].mean(), " d"),
-                help="Negativo = entregado antes del plazo; positivo = días de atraso.")
+    if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
+        desf = int(np.busday_count(np.datetime64(K["fin_plan"].date()), np.datetime64(K["cierre"].date()), holidays=HOL))
+        c[0].metric("Cierre estimado al ritmo actual", f"{K['cierre']:%d/%m/%Y}",
+                    f"{desf:+d} días háb. vs plan ({K['fin_plan']:%d/%m})", delta_color="inverse")
+    else:
+        c[0].metric("Cierre estimado al ritmo actual", "—", "sin entregas recientes", delta_color="off")
+    c[1].metric("Pendientes con restricción externa", f"{len(RESTR)}",
+                f"{len(RESTR) / len(PEND) * 100:.0f}% del backlog" if len(PEND) else None, delta_color="off")
+    c[2].metric("Entregas registradas (detalle diario)", f"{len(ENT_C)}",
+                f"{int(ENT_C['Reentrega'].sum())} reentregas", delta_color="off")
+    c[3].metric("Antigüedad máxima de un pendiente", f"{int(PEND['Antigüedad (días háb.)'].max())} días háb."
+                if PEND["Antigüedad (días háb.)"].notna().any() else "—")
 
-    g1, g2 = st.columns([1, 2])
+    g1, g2 = st.columns([2, 1])
     with g1:
-        if pd.notna(otd):
-            fig = go.Figure(go.Indicator(
-                mode="gauge+number+delta", value=otd,
-                number={"suffix": "%", "valueformat": ".1f"},
-                delta={"reference": meta, "valueformat": ".1f", "suffix": " pp"},
-                gauge={"axis": {"range": [0, 100]}, "bar": {"color": AZUL},
-                       "steps": [{"range": [0, max(0, meta - 15)], "color": "#FADBD8"},
-                                 {"range": [max(0, meta - 15), meta], "color": "#FDEBD0"},
-                                 {"range": [meta, 100], "color": "#D6EAF8"}],
-                       "threshold": {"line": {"color": NARANJA, "width": 4}, "value": meta}}))
-            mostrar(estilo(fig, 330, "Semáforo de cumplimiento (OTD)"))
-        else:
-            sin_datos()
+        mostrar(fig_burndown(S, PLAN, K, corte, f"Curva de cierre del backlog {' + '.join(alcance)}: plan vs real"))
+        st.caption("Tramo sin detalle diario (entre listas de corte) unido en línea recta. La proyección naranja "
+                   "extiende la productividad de la ventana seleccionada.")
     with g2:
-        if len(ent):
-            m = (ent.groupby("Mes Entrega").agg(Total=("ID", "count"), ATiempo=("A Tiempo", "sum"))
-                 .reset_index().sort_values("Mes Entrega"))
-            m["Fuera"] = m["Total"] - m["ATiempo"]
-            m["OTD"] = m["ATiempo"] / m["Total"] * 100
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_bar(x=m["Mes Entrega"], y=m["ATiempo"], name="A tiempo", marker_color=AZUL)
-            fig.add_bar(x=m["Mes Entrega"], y=m["Fuera"], name="Fuera de plazo", marker_color=NARANJA)
-            fig.add_scatter(x=m["Mes Entrega"], y=m["OTD"], name="% OTD", mode="lines+markers+text",
-                            text=m["OTD"].round(0).astype(int).astype(str) + "%", textposition="top center",
-                            line=dict(color="#17202A", width=2.5), secondary_y=True)
-            fig.add_scatter(x=m["Mes Entrega"], y=[meta] * len(m), name=f"Meta {meta}%", mode="lines",
-                            line=dict(color=NARANJA, dash="dash"), secondary_y=True)
-            fig.update_layout(barmode="stack")
-            fig.update_yaxes(title_text="N° informes", secondary_y=False)
-            fig.update_yaxes(title_text="% OTD", range=[0, 110], secondary_y=True, showgrid=False)
-            mostrar(estilo(fig, 330, "Entregas mensuales y tendencia del OTD"))
-        else:
-            sin_datos()
+        g = INF.groupby(["Grupo", "Estado"]).size().unstack(fill_value=0).reindex(columns=["Entregado", "Pendiente"], fill_value=0)
+        g["Total"] = g.sum(axis=1)
+        fig = go.Figure()
+        fig.add_bar(x=g.index, y=g["Entregado"], name="Entregado", marker_color=AZUL, text=g["Entregado"])
+        fig.add_bar(x=g.index, y=g["Pendiente"], name="Pendiente", marker_color=NARANJA, text=g["Pendiente"])
+        for grp, r in g.iterrows():
+            fig.add_annotation(x=grp, y=r["Total"], text=f"<b>{r['Entregado'] / r['Total'] * 100:.0f}%</b>",
+                               showarrow=False, yshift=12)
+        fig.update_layout(barmode="stack", yaxis_title="N° informes")
+        mostrar(estilo(fig, 400, "Estado por grupo (% avance)"))
 
-    g3, g4 = st.columns([1, 1])
-    with g3:
-        s = d["Situación"].value_counts().reindex(list(COLOR_SIT)).dropna().reset_index()
-        s.columns = ["Situación", "N"]
-        if len(s):
-            fig = px.bar(s, x="N", y="Situación", orientation="h", color="Situación",
-                         color_discrete_map=COLOR_SIT, text="N")
-            fig.update_layout(showlegend=False, yaxis_title=None, xaxis_title="N° informes")
-            mostrar(estilo(fig, 320, "Situación actual de la cartera de informes"))
-    with g4:
-        st.markdown("##### 🧠 Hallazgos automáticos")
-        for h in hallazgos(d, meta):
-            st.markdown(f"- {h}")
-    expander_registro("t1")
+    st.markdown("##### 🧠 Lectura gerencial")
+    notas = []
+    if pd.notna(K["spi"]):
+        est = "por encima" if K["spi"] >= 100 else "por debajo"
+        notas.append(f"El avance real acumulado del alcance {' + '.join(alcance)} ({K['real_acum']} informes desde el "
+                     f"{K['d0'] + pd.Timedelta(days=1):%d/%m}) está **{est} del plan** ({K['plan_acum']:.0f}): "
+                     f"cumplimiento de **{K['spi']:.0f}%**.")
+    if K.get("crec_alcance"):
+        pl_hoy = serie_plan(PLAN, K["b0"])
+        pl_hoy = pl_hoy[pl_hoy["Fecha"] <= corte]["Plan"].iloc[-1] if len(pl_hoy) else np.nan
+        notas.append(f"El alcance creció en **{K['crec_alcance']}** informes desde la línea base del "
+                     f"{K['d0']:%d/%m} ({K['b0']} → {K['total']}); por ello, aun entregando más de lo planificado, "
+                     f"el backlog real (**{K['pendientes']}**) se compara con **{pl_hoy:.0f}** del plan a la fecha.")
+    if pd.notna(K["cierre"]) and pd.notna(K["fin_plan"]):
+        notas.append(f"Con **{K['vel']:.1f} informes/día** (meta {K['meta_prom']:.0f}), los **{K['pendientes']} pendientes** "
+                     f"se cerrarían hacia el **{K['cierre']:%d/%m/%Y}** frente al **{K['fin_plan']:%d/%m/%Y}** del plan"
+                     + (" — se requiere reforzar capacidad o priorizar." if K["cierre"] > K["fin_plan"] else "."))
+        if K["cierre"] > K["fin_plan"] and K["pendientes"]:
+            dias_rest = max(1, int(np.busday_count(np.datetime64(corte.date()), np.datetime64(K["fin_plan"].date()), holidays=HOL)))
+            notas.append(f"Para cumplir la fecha del plan se necesitan **{K['pendientes'] / dias_rest:.1f} informes/día hábil**.")
+    if len(RESTR):
+        top = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts()
+        notas.append(f"**{len(RESTR)}** pendientes dependen de gestiones externas; la principal es **{top.index[0]}** "
+                     f"({top.iloc[0]} informes, {top.iloc[0] / len(RESTR) * 100:.0f}%). Conviene tratarla como punto "
+                     "fijo en la reunión de seguimiento con Repsol.")
+    ven = ENT_C[(ENT_C["Fecha"] >= K["vel_ini"]) & ENT_C["Código"].isin(S["Código"]) & ~ENT_C["Reentrega"]]
+    fin_sem = ven[~ven["Fecha"].map(es_habil)]
+    if len(fin_sem):
+        solo_hab = (len(ven) - len(fin_sem)) / n_vel
+        notas.append(f"De las entregas del alcance en la ventana, **{len(fin_sem)}** se hicieron en fin de semana o "
+                     f"feriado (días sin meta). Sin ese esfuerzo adicional la productividad sería de **{solo_hab:.1f} "
+                     f"informes/día hábil**" + (", por debajo de la meta: el cumplimiento actual depende de horas extra."
+                                                  if pd.notna(K["meta_prom"]) and solo_hab < K["meta_prom"] else "."))
+    if n_incons:
+        notas.append(f"Se detectaron **{n_incons}** registros por conciliar (ver pestaña *Calidad de Datos*).")
+    for nt in notas:
+        st.markdown(f"- {nt}")
+    acciones_rapidas("t1", corte)
 
-# ───────────────────────── 2. CUMPLIMIENTO ─────────────────────────
+# ─────────────────────── 2. AVANCE Y PRODUCTIVIDAD ───────────────────────
 with tabs[1]:
-    if not len(ent):
-        sin_datos()
+    if ENT_C.empty:
+        sin_datos("No hay entregas diarias registradas hasta la fecha de corte.")
     else:
-        g1, g2 = st.columns(2)
-        for col, contenedor, titulo in [("Especialidad", g1, "OTD por especialidad"),
-                                        ("Responsable", g2, "OTD por responsable")]:
-            with contenedor:
-                r = (ent.groupby(col)["A Tiempo"].agg(OTD="mean", N="count").reset_index())
-                r["OTD"] *= 100
-                r = r.sort_values("OTD")
-                r["Color"] = np.where(r["OTD"] >= meta, "Cumple meta", "Bajo meta")
-                fig = px.bar(r, x="OTD", y=col, orientation="h", color="Color",
-                             color_discrete_map={"Cumple meta": AZUL, "Bajo meta": NARANJA},
-                             text=r["OTD"].round(0).astype(int).astype(str) + "% (n=" + r["N"].astype(str) + ")",
-                             custom_data=["N"])
-                fig.add_vline(x=meta, line_dash="dash", line_color="#17202A",
-                              annotation_text=f"Meta {meta}%", annotation_position="top")
-                fig.update_layout(xaxis_range=[0, 115], xaxis_title="% entregado a tiempo", yaxis_title=None)
-                mostrar(estilo(fig, max(320, 42 * len(r) + 80), titulo))
+        dia = ENT_C.assign(Serie=np.where(ENT_C["Reentrega"], "Reentrega", ENT_C["Grupo maestro"].fillna("G1")))
+        d = dia.groupby(["Fecha", "Serie"]).size().reset_index(name="N")
+        fig = px.bar(d, x="Fecha", y="N", color="Serie", color_discrete_map=COLOR_GRUPO, text="N",
+                     category_orders={"Serie": ["G1", "G2", "G3", "Reentrega"]})
+        if len(PLAN):
+            p = PLAN[(PLAN["Fecha"] >= ENT_C["Fecha"].min()) & (PLAN["Fecha"] <= corte)]
+            fig.add_scatter(x=p["Fecha"], y=p["Meta Diaria"], name="Meta diaria", mode="lines+markers",
+                            line=dict(color="#17202A", dash="dash", shape="hv"))
+        fig.update_layout(barmode="stack", yaxis_title="Informes entregados", xaxis_title=None)
+        fig.update_xaxes(tickformat="%a %d/%m", dtick=86400000)
+        mostrar(estilo(fig, 390, "Entregas diarias por grupo vs meta"))
 
-        piv = ent.pivot_table(index="Especialidad", columns="Mes Entrega", values="A Tiempo", aggfunc="mean") * 100
-        if piv.shape[1] >= 1:
-            fig = px.imshow(piv.sort_index(axis=1), text_auto=".0f", aspect="auto", zmin=0, zmax=100,
-                            color_continuous_scale="RdYlBu", labels=dict(color="% OTD", x="Mes", y=""))
-            mostrar(estilo(fig, max(300, 50 * len(piv) + 100), "Mapa de calor: OTD por especialidad y mes"))
-
-        u = ent.groupby(["Unidad / Área", "Situación"]).size().reset_index(name="N")
-        top = ent["Unidad / Área"].value_counts().head(12).index
-        u = u[u["Unidad / Área"].isin(top)]
-        u["%"] = u["N"] / u.groupby("Unidad / Área")["N"].transform("sum") * 100
-        fig = px.bar(u, x="%", y="Unidad / Área", color="Situación", orientation="h",
-                     color_discrete_map=COLOR_SIT, text=u["%"].round(0).astype(int).astype(str) + "%",
-                     hover_data=["N"])
-        fig.update_layout(barmode="stack", xaxis_title="% de informes entregados", yaxis_title=None)
-        mostrar(estilo(fig, max(320, 40 * len(top) + 100), "Composición de cumplimiento por unidad / área (top 12)"))
-    expander_registro("t2")
-
-# ────────────────────── 3. TIEMPOS Y ESTABILIDAD ──────────────────────
-with tabs[2]:
-    lt_df = d[d["Lead Time"].notna()]
-    if not len(lt_df):
-        sin_datos()
-    else:
         g1, g2 = st.columns(2)
         with g1:
-            orden = lt_df.groupby("Especialidad")["Lead Time"].median().sort_values().index.tolist()
-            fig = px.box(lt_df, x="Especialidad", y="Lead Time", points="outliers",
-                         category_orders={"Especialidad": orden}, color_discrete_sequence=[AZUL])
-            fig.add_hline(y=plazo, line_dash="dash", line_color=NARANJA, annotation_text=f"Plazo {plazo} d")
-            fig.update_layout(yaxis_title="Lead time (días)", xaxis_title=None)
-            mostrar(estilo(fig, 360, "Dispersión del lead time por especialidad"))
+            if len(PLAN):
+                d0 = K["d0"]
+                pl = PLAN[PLAN["Fecha"] > d0].copy()
+                pl["Plan acumulado"] = pl["Meta Diaria"].cumsum()
+                rp = entregas_por_dia(S)
+                rp = rp[(rp.index > d0) & (rp.index <= corte)].cumsum()
+                fig = go.Figure()
+                fig.add_scatter(x=pl["Fecha"], y=pl["Plan acumulado"], name="Plan acumulado", mode="lines",
+                                line=dict(color=GRIS, dash="dash", width=2.5))
+                fig.add_scatter(x=rp.index, y=rp.values, name="Real acumulado", mode="lines+markers",
+                                line=dict(color=AZUL, width=3))
+                fig.add_hline(y=K["b0"], line_color=NARANJA, line_dash="dot",
+                              annotation_text=f"Alcance inicial {K['b0']}", annotation_position="top left")
+                fig.update_xaxes(tickformat="%d/%m")
+                fig.update_layout(yaxis_title="Informes entregados", hovermode="x unified")
+                mostrar(estilo(fig, 380, f"Curva S: entregas acumuladas {' + '.join(alcance)}"))
+            else:
+                sin_datos("Registre el plan de entrega para ver la curva S.")
         with g2:
-            fig = px.histogram(lt_df, x="Lead Time", nbins=int(min(40, lt_df["Lead Time"].max() + 1)),
-                               color_discrete_sequence=[AZUL_CL])
-            fig.add_vline(x=plazo, line_dash="dash", line_color=NARANJA, annotation_text=f"Plazo {plazo} d")
-            fig.add_vline(x=lt_df["Lead Time"].mean(), line_color=AZUL,
-                          annotation_text=f"Media {lt_df['Lead Time'].mean():.1f} d", annotation_position="top left")
-            fig.update_layout(xaxis_title="Lead time (días)", yaxis_title="N° informes", bargap=.05)
-            mostrar(estilo(fig, 360, "Distribución del lead time"))
+            t = ENT_C.groupby(["Tipo (GP_AD)", "Grupo maestro"]).size().reset_index(name="N")
+            t["Tipo (GP_AD)"] = t["Tipo (GP_AD)"].replace("", "Sin tipo")
+            orden = t.groupby("Tipo (GP_AD)")["N"].sum().sort_values().index.tolist()
+            fig = px.bar(t, x="N", y="Tipo (GP_AD)", color="Grupo maestro", orientation="h", text="N",
+                         color_discrete_map=COLOR_GRUPO, category_orders={"Tipo (GP_AD)": orden[::-1]})
+            fig.update_layout(barmode="stack", xaxis_title="Entregas", yaxis_title=None)
+            mostrar(estilo(fig, 380, "Mix de entregas por tipo (GP_AD)"))
 
-        st.markdown("##### 📉 Gráfico de control I-MR del lead time")
-        opts = ["Todas"] + sorted(lt_df["Especialidad"].unique())
-        sel = st.selectbox("Especialidad para el gráfico de control", opts, key="cc_esp")
-        s = lt_df if sel == "Todas" else lt_df[lt_df["Especialidad"] == sel]
-        s = s.sort_values("Fecha Entrega").reset_index(drop=True)
-        if len(s) >= 8:
-            x = s["Lead Time"].to_numpy()
-            media, mrbar = x.mean(), np.abs(np.diff(x)).mean()
-            ucl, lcl = media + 2.66 * mrbar, max(0.0, media - 2.66 * mrbar)
-            fuera = (x > ucl) | (x < lcl)
+        st.markdown("##### 📉 Estabilidad de la productividad diaria (gráfico I-MR)")
+        hab = ENT_C.groupby("Fecha").size()
+        rango = pd.date_range(ENT_C["Fecha"].min(), corte)
+        hab = hab.reindex(rango, fill_value=0)
+        hab = hab[[es_habil(x) for x in hab.index]]
+        if len(hab) >= 5:
+            x = hab.to_numpy(dtype=float)
+            media, mr = x.mean(), np.abs(np.diff(x)).mean()
+            lsc, lic = media + 2.66 * mr, max(0.0, media - 2.66 * mr)
             fig = go.Figure()
-            fig.add_scatter(x=s.index + 1, y=x, mode="lines+markers", name="Lead time",
-                            line=dict(color=AZUL_CL), marker=dict(color=AZUL, size=6),
-                            customdata=np.stack([s["ID"], s["Especialidad"], s["Fecha Entrega"].dt.strftime("%d/%m/%Y")], -1),
-                            hovertemplate="%{customdata[0]} · %{customdata[1]}<br>Entrega %{customdata[2]}"
-                                          "<br>Lead time %{y} d<extra></extra>")
-            fig.add_scatter(x=(s.index + 1)[fuera], y=x[fuera], mode="markers", name="Fuera de control",
-                            marker=dict(color=ROJO, size=11, symbol="diamond"))
-            for y, nom, col, dash in [(media, "Media", "#17202A", "solid"), (ucl, "LSC", NARANJA, "dash"),
-                                      (lcl, "LIC", NARANJA, "dash")]:
-                fig.add_hline(y=y, line_color=col, line_dash=dash, annotation_text=f"{nom} {y:.1f}",
-                              annotation_position="right")
-            fig.update_layout(xaxis_title="Secuencia de informes (orden de entrega)", yaxis_title="Días")
-            mostrar(estilo(fig, 380))
-            st.caption(f"Límites 3σ (I-MR): media {media:.1f} d · LSC {ucl:.1f} d · LIC {lcl:.1f} d · "
-                       f"**{int(fuera.sum())}** punto(s) fuera de control por causa especial. "
-                       "Si la media está por encima del plazo con el proceso estable, el problema es de "
-                       "capacidad del proceso (mejora estructural), no de casos aislados.")
+            fig.add_scatter(x=hab.index, y=x, mode="lines+markers+text", text=x.astype(int), textposition="top center",
+                            name="Entregas por día hábil", line=dict(color=AZUL_CL), marker=dict(color=AZUL, size=8))
+            fuera = (x > lsc) | (x < lic)
+            fig.add_scatter(x=hab.index[fuera], y=x[fuera], mode="markers", name="Fuera de control",
+                            marker=dict(color=ROJO, size=13, symbol="diamond"))
+            for y, n, col, dsh in [(media, "Media", "#17202A", "solid"), (lsc, "LSC", NARANJA, "dash"), (lic, "LIC", NARANJA, "dash")]:
+                fig.add_hline(y=y, line_color=col, line_dash=dsh, annotation_text=f"{n} {y:.1f}", annotation_position="right")
+            if pd.notna(K["meta_prom"]):
+                fig.add_hline(y=K["meta_prom"], line_color=VERDE_AZ, line_dash="dot",
+                              annotation_text=f"Meta {K['meta_prom']:.0f}", annotation_position="left")
+            fig.update_xaxes(tickformat="%a %d/%m")
+            fig.update_layout(yaxis_title="Informes / día")
+            mostrar(estilo(fig, 360))
+            st.caption(f"Media {media:.1f} · LSC {lsc:.1f} · LIC {lic:.1f} (n={len(x)} días hábiles). Con pocos días los "
+                       "límites son orientativos; si la meta cae fuera de la banda, el proceso actual no la alcanza de "
+                       "forma sostenida y requiere un cambio de capacidad o método.")
         else:
-            sin_datos("Se requieren al menos 8 informes entregados para construir el gráfico de control.")
+            sin_datos("Se requieren al menos 5 días hábiles con registro para el gráfico de control.")
 
-        t = (lt_df.groupby(["Mes Entrega", "Especialidad"])["Lead Time"].mean().reset_index())
-        fig = px.line(t, x="Mes Entrega", y="Lead Time", color="Especialidad", markers=True,
-                      color_discrete_sequence=px.colors.qualitative.Safe)
-        fig.add_hline(y=plazo, line_dash="dash", line_color=NARANJA, annotation_text=f"Plazo {plazo} d")
-        fig.update_layout(yaxis_title="Lead time promedio (días)", xaxis_title=None)
-        mostrar(estilo(fig, 360, "Evolución mensual del lead time por especialidad"))
-    expander_registro("t3")
+        st.markdown("##### 📋 Plan vs real por día")
+        if len(PLAN):
+            real_d = ENT_C.groupby("Fecha").size()
+            real_s = entregas_por_dia(S)
+            tab = PLAN[(PLAN["Fecha"] >= ENT_C["Fecha"].min()) & (PLAN["Fecha"] <= corte)].copy()
+            tab["Real (todos)"] = tab["Fecha"].map(real_d).fillna(0).astype(int)
+            tab[f"Real {'+'.join(alcance)}"] = tab["Fecha"].map(real_s).fillna(0).astype(int)
+            tab["Desvío alcance"] = tab[f"Real {'+'.join(alcance)}"] - tab["Meta Diaria"]
+            st.dataframe(tab, hide_index=True, use_container_width=True,
+                         column_config={"Fecha": st.column_config.DateColumn(format="ddd DD/MM/YYYY")})
+    acciones_rapidas("t2", corte)
 
-# ───────────────────────── 4. MEJORA CONTINUA ─────────────────────────
-with tabs[3]:
-    g1, g2 = st.columns([3, 2])
-    with g1:
-        tarde = ent[ent["A Tiempo"] == 0]
-        if len(tarde):
-            p = (tarde["Causa de Retraso"].replace("", "Sin causa registrada").value_counts()
-                 .rename_axis("Causa").reset_index(name="N"))
-            p["Acum"] = p["N"].cumsum() / p["N"].sum() * 100
-            vital = p["Acum"].shift(fill_value=0) < 80
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_bar(x=p["Causa"], y=p["N"], name="Informes fuera de plazo", text=p["N"],
-                        marker_color=np.where(vital, NARANJA, GRIS))
-            fig.add_scatter(x=p["Causa"], y=p["Acum"], name="% acumulado", mode="lines+markers",
-                            line=dict(color=AZUL, width=2.5), secondary_y=True)
-            fig.add_scatter(x=p["Causa"], y=[80] * len(p), name="80%", mode="lines",
-                            line=dict(color="#17202A", dash="dot"), secondary_y=True)
-            fig.update_yaxes(title_text="N° informes", secondary_y=False)
-            fig.update_yaxes(title_text="% acumulado", range=[0, 105], secondary_y=True, showgrid=False)
-            mostrar(estilo(fig, 400, "Pareto de causas de retraso (80/20)"))
-            st.caption("En naranja, las **pocas causas vitales** que explican ~80% de los retrasos: "
-                       "son el foco prioritario para el plan de acción (5 Porqués / Ishikawa).")
-        else:
-            sin_datos("No hay informes fuera de plazo en el periodo filtrado. 👏")
-    with g2:
-        f = d[d["Sin Revisión"].notna()].groupby("Especialidad")["Sin Revisión"].agg(FPY="mean", N="count").reset_index()
-        if len(f):
-            f["FPY"] *= 100
-            f = f.sort_values("FPY")
-            fig = px.bar(f, x="FPY", y="Especialidad", orientation="h", color_discrete_sequence=[AZUL],
-                         text=f["FPY"].round(0).astype(int).astype(str) + "%")
-            fig.update_layout(xaxis_range=[0, 110], xaxis_title="% aprobado sin revisiones", yaxis_title=None)
-            mostrar(estilo(fig, 400, "Calidad a la primera (FPY) por especialidad"))
-
-    g3, g4 = st.columns(2)
-    with g3:
-        rv = d[d["Entregado"]].copy()
-        if len(rv):
-            rv["Revisiones"] = pd.cut(rv["N° Revisiones"], [-1, 0, 1, 2, np.inf], labels=["0", "1", "2", "3+"]).astype(str)
-            r = rv.groupby(["Especialidad", "Revisiones"]).size().reset_index(name="N")
-            fig = px.bar(r, x="Especialidad", y="N", color="Revisiones", text="N",
-                         color_discrete_map={"0": AZUL, "1": AZUL_CL, "2": NARANJA, "3+": ROJO},
-                         category_orders={"Revisiones": ["0", "1", "2", "3+"]})
-            fig.update_layout(barmode="stack", yaxis_title="N° informes", xaxis_title=None)
-            mostrar(estilo(fig, 360, "Reprocesos: N° de revisiones por especialidad"))
-    with g4:
-        if len(ent):
-            sc = ent.copy()
-            fig = px.scatter(sc, x="N° Revisiones", y="Lead Time", color="Especialidad", opacity=.7,
-                             color_discrete_sequence=px.colors.qualitative.Safe,
-                             hover_data=["ID", "N° OT", "Responsable"])
-            fig.add_hline(y=plazo, line_dash="dash", line_color=NARANJA)
-            fig.update_layout(xaxis_title="N° de revisiones", yaxis_title="Lead time (días)")
-            mostrar(estilo(fig, 360, "Relación reprocesos vs lead time"))
-            if sc["N° Revisiones"].nunique() > 1:
-                r = sc[["N° Revisiones", "Lead Time"]].corr().iloc[0, 1]
-                st.caption(f"Correlación revisiones–lead time: **r = {r:.2f}**. "
-                           + ("Los reprocesos explican parte relevante del atraso: reforzar la revisión "
-                              "interna previa a la emisión." if r >= .3 else
-                              "Los reprocesos no son el principal impulsor del atraso."))
-    expander_registro("t4")
-
-# ─────────────────────── 5. BACKLOG Y ALERTAS ───────────────────────
-with tabs[4]:
-    if not len(pend):
-        st.success("No hay informes pendientes con los filtros actuales. ✅")
+# ─────────────────────── 3. BACKLOG Y RESTRICCIONES ───────────────────────
+with tabs[2]:
+    if PEND.empty:
+        st.success("No hay informes pendientes. ✅")
     else:
         g1, g2 = st.columns(2)
         with g1:
-            b = pend.copy()
-            b["Antigüedad (días)"] = pd.cut(b["Antigüedad"], [-np.inf, 3, 7, 15, np.inf],
-                                            labels=["0–3", "4–7", "8–15", ">15"]).astype(str)
-            a = b.groupby(["Antigüedad (días)", "Especialidad"]).size().reset_index(name="N")
-            fig = px.bar(a, x="Antigüedad (días)", y="N", color="Especialidad", text="N",
-                         category_orders={"Antigüedad (días)": ["0–3", "4–7", "8–15", ">15"]},
-                         color_discrete_sequence=px.colors.qualitative.Safe)
-            fig.update_layout(barmode="stack", yaxis_title="N° pendientes")
-            mostrar(estilo(fig, 360, "Antigüedad del backlog (aging)"))
+            b = PEND.copy()
+            b["Antigüedad"] = pd.cut(b["Antigüedad (días háb.)"].fillna(-1), [-np.inf, -0.5, 5, 10, 20, np.inf],
+                                     labels=["Sin fecha", "0–5", "6–10", "11–20", ">20"]).astype(str)
+            a = b.groupby(["Antigüedad", "Grupo"]).size().reset_index(name="N")
+            fig = px.bar(a, x="Antigüedad", y="N", color="Grupo", text="N", color_discrete_map=COLOR_GRUPO,
+                         category_orders={"Antigüedad": ["0–5", "6–10", "11–20", ">20", "Sin fecha"], "Grupo": GRUPOS})
+            fig.update_layout(barmode="stack", xaxis_title="Días hábiles desde el ingreso al backlog", yaxis_title="Pendientes")
+            mostrar(estilo(fig, 380, "Antigüedad del backlog pendiente"))
         with g2:
-            cr = pend.groupby(["Responsable", "Situación"]).size().reset_index(name="N")
-            orden = pend["Responsable"].value_counts().sort_values().index.tolist()
-            fig = px.bar(cr, x="N", y="Responsable", color="Situación", orientation="h", text="N",
-                         color_discrete_map=COLOR_SIT, category_orders={"Responsable": orden[::-1]})
-            fig.update_layout(barmode="stack", xaxis_title="N° pendientes", yaxis_title=None)
-            mostrar(estilo(fig, max(360, 34 * len(orden) + 100), "Carga pendiente por responsable"))
+            if len(RESTR):
+                p = RESTR["Restricción"].replace("", "Sin restricción registrada").value_counts().rename_axis("Restricción").reset_index(name="N")
+                p["Acum"] = p["N"].cumsum() / p["N"].sum() * 100
+                vital = p["Acum"].shift(fill_value=0) < 80
+                fig = make_subplots(specs=[[{"secondary_y": True}]])
+                fig.add_bar(x=p["Restricción"], y=p["N"], text=p["N"], name="Pendientes",
+                            marker_color=np.where(vital, NARANJA, GRIS))
+                fig.add_scatter(x=p["Restricción"], y=p["Acum"], name="% acumulado", mode="lines+markers",
+                                line=dict(color=AZUL, width=2.5), secondary_y=True)
+                fig.add_scatter(x=p["Restricción"], y=[80] * len(p), name="80%", mode="lines",
+                                line=dict(color="#17202A", dash="dot"), secondary_y=True)
+                fig.update_yaxes(title_text="Pendientes", secondary_y=False)
+                fig.update_yaxes(range=[0, 105], showgrid=False, secondary_y=True, title_text="% acumulado")
+                mostrar(estilo(fig, 380, "Pareto de restricciones externas (G3)"))
+            else:
+                sin_datos("No hay pendientes con restricción registrada.")
 
-        st.markdown("##### 🚨 Informes pendientes vencidos")
-        v = pend[pend["Días Vencido"] > 0].sort_values("Días Vencido", ascending=False)
+        tm = PEND.assign(Plan=PEND["Plan"].replace("", "Sin plan"),
+                         Restricción=PEND["Restricción"].replace("", "Sin restricción"))
+        fig = px.treemap(tm, path=[px.Constant("Backlog pendiente"), "Grupo", "Plan", "Restricción"],
+                         color="Grupo", color_discrete_map={**COLOR_GRUPO, "(?)": "#EAF2F8"})
+        fig.update_traces(textinfo="label+value")
+        mostrar(estilo(fig, 420, "Composición del backlog pendiente: grupo › plan › restricción"))
+
+        st.markdown("##### 📋 Detalle de pendientes")
+        c1, c2 = st.columns([1, 2])
+        fg = c1.multiselect("Grupo", GRUPOS, default=GRUPOS, key="bk_g")
+        q = c2.text_input("Buscar (N°, TAG, restricción…)", key="bk_q")
+        v = PEND[PEND["Grupo"].isin(fg)]
+        if q:
+            v = v[v.astype(str).apply(lambda r: r.str.contains(q, case=False)).any(axis=1)]
+        st.dataframe(v[["Código", "Grupo", "Plan", "TAG / Circuito", "Restricción", "Fecha Ingreso",
+                        "Antigüedad (días háb.)", "Observaciones"]].sort_values("Antigüedad (días háb.)", ascending=False),
+                     hide_index=True, use_container_width=True,
+                     column_config={"Fecha Ingreso": st.column_config.DateColumn(format="DD/MM/YYYY")})
+    acciones_rapidas("t3", corte)
+
+# ─────────────────────────── 4. CALIDAD DE DATOS ───────────────────────────
+with tabs[3]:
+    st.markdown("La confiabilidad del KPI depende de la conciliación entre las listas por grupo, el registro diario y "
+                "el plan. Estas verificaciones se recalculan con cada actualización.")
+    cols = st.columns(3)
+    for i, (k, v) in enumerate(CAL.items()):
+        cols[i % 3].metric(k, len(v))
+    for k, v in CAL.items():
         if len(v):
-            st.dataframe(
-                v[["ID", "N° OT", "Especialidad", "Unidad / Área", "Equipo / TAG", "Responsable",
-                   "Fecha Ejecución", "Fecha Límite", "Días Vencido", "Estado"]],
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "Fecha Ejecución": st.column_config.DateColumn(format="DD/MM/YYYY"),
-                    "Fecha Límite": st.column_config.DateColumn(format="DD/MM/YYYY"),
-                    "Días Vencido": st.column_config.ProgressColumn(
-                        format="%d d", min_value=0, max_value=float(v["Días Vencido"].max())),
-                })
-        else:
-            st.success("Todos los pendientes se encuentran dentro del plazo.")
-        prox = pend[(pend["Días Vencido"] == 0) & pend["Fecha Límite"].notna()]
-        prox = prox[dias_entre(pd.Series(pd.Timestamp(HOY), index=prox.index), prox["Fecha Límite"], habiles) <= 2]
-        if len(prox):
-            st.markdown("##### ⏳ Por vencer (≤ 2 días)")
-            st.dataframe(prox[["ID", "N° OT", "Especialidad", "Responsable", "Fecha Límite", "Estado"]],
-                         use_container_width=True, hide_index=True,
-                         column_config={"Fecha Límite": st.column_config.DateColumn(format="DD/MM/YYYY")})
-    expander_registro("t5")
+            with st.expander(f"{k} ({len(v)})"):
+                st.dataframe(v, hide_index=True, use_container_width=True,
+                             column_config={c: st.column_config.DateColumn(format="DD/MM/YYYY")
+                                            for c in ["Fecha", "Fecha Ingreso", "Fecha Entrega"] if c in v.columns})
+    if st.session_state.notas:
+        st.markdown("##### 📝 Notas de conciliación de la última importación")
+        for nt in st.session_state.notas:
+            st.markdown(f"- {nt}")
 
-# ─────────────────────── 6. GESTIÓN DE MATRIZ ───────────────────────
-with tabs[5]:
-    s1, s2, s3, s4 = st.tabs(["➕ Añadir registro", "✏️ Actualizar matriz", "⬆️ Subir matriz", "⬇️ Descargar"])
+# ─────────────────────────── 5. GESTIÓN DE MATRIZ ───────────────────────────
+with tabs[4]:
+    s1, s2, s3, s4, s5, s6, s7 = st.tabs(["📬 Registrar entregas", "➕ Nuevo informe", "✏️ Maestro de informes",
+                                          "📅 Registro diario", "🗓️ Plan de entrega", "⬆️ Subir matriz", "⬇️ Descargar"])
     with s1:
-        form_registro("gm")
+        form_entregas("gm_e", corte)
     with s2:
-        editor_matriz()
-    with s3:
-        st.markdown("Suba la matriz actualizada. Las columnas se reconocen automáticamente aunque tengan "
-                    "nombres distintos (p. ej. *Fecha Inspección*, *Fecha Límite*, *Disciplina*); puede "
-                    "ajustar el mapeo antes de confirmar.")
-        carga_matriz("gm")
-    with s4:
-        kpi_mes = pd.DataFrame()
-        if len(ent):
-            kpi_mes = (ent.groupby("Mes Entrega").agg(Entregados=("ID", "count"), A_Tiempo=("A Tiempo", "sum"),
-                                                      Lead_Time_Prom=("Lead Time", "mean"),
-                                                      FPY=("Sin Revisión", "mean")).reset_index())
-            kpi_mes["OTD_%"] = (kpi_mes["A_Tiempo"] / kpi_mes["Entregados"] * 100).round(1)
-            kpi_mes["FPY"] = (kpi_mes["FPY"] * 100).round(1)
-            kpi_mes["Lead_Time_Prom"] = kpi_mes["Lead_Time_Prom"].round(1)
-        c1, c2, c3 = st.columns(3)
-        c1.download_button("⬇️ Matriz completa (.xlsx)", a_excel(df_base),
-                           file_name=f"MATRIZ_KPI_ENTREGA_INFORMES_{HOY:%Y%m%d}.xlsx", use_container_width=True)
-        vista = d.drop(columns=["Entregado"]).copy()
-        c2.download_button("⬇️ Vista filtrada con cálculos + KPI mensual", a_excel(vista, {"KPI_MENSUAL": kpi_mes}),
-                           file_name=f"REPORTE_KPI_INFORMES_{HOY:%Y%m%d}.xlsx", use_container_width=True)
-        c3.download_button("⬇️ Plantilla vacía", a_excel(pd.DataFrame(columns=COLUMNS)),
-                           file_name="PLANTILLA_MATRIZ_KPI_INFORMES.xlsx", use_container_width=True)
-        if len(kpi_mes):
-            st.dataframe(kpi_mes, use_container_width=True, hide_index=True)
+        form_informe("gm_i")
 
-st.caption("OTD: entregado ≤ fecha límite (Fecha Compromiso o, en su defecto, Fecha Ejecución + plazo estándar). "
-           "Lead time: Fecha Ejecución → Fecha Entrega. FPY: informes entregados con 0 revisiones. "
-           "Los registros «Anulado» se excluyen de los indicadores.")
+    def _editor(df, key, cfg, motivo, cual):
+        if not puede_editar():
+            st.warning("🔒 Ingrese la clave de edición en la barra lateral para modificar la matriz.")
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            return
+        ed = st.data_editor(df, num_rows="dynamic", hide_index=True, use_container_width=True,
+                            column_config=cfg, key=key, height=480)
+        c1, c2, _ = st.columns([1, 1, 3])
+        if c1.button("💾 Guardar cambios", type="primary", key=f"{key}_g"):
+            s = st.session_state
+            args = {"inf": s.inf, "ent": s.ent, "plan": s.plan}
+            args[cual] = ed
+            guardar(args["inf"], args["ent"], args["plan"], motivo)
+            st.rerun()
+        if c2.button("↩️ Descartar", key=f"{key}_d"):
+            st.session_state.pop(key, None)
+            st.rerun()
+
+    fecha_cfg = lambda c: st.column_config.DateColumn(c, format="DD/MM/YYYY")  # noqa: E731
+    with s3:
+        st.caption("Una fila por informe. El estado y la fecha de entrega se actualizan automáticamente desde el "
+                   "registro diario; los entregados sin registro diario conservan su fecha referencial.")
+        _editor(INF, "ed_inf", {
+            "Grupo": st.column_config.SelectboxColumn(options=GRUPOS),
+            "Estado": st.column_config.SelectboxColumn(options=["Pendiente", "Entregado"]),
+            "Plan": st.column_config.SelectboxColumn(options=[""] + sorted(set(PLANES) | set(INF["Plan"]) - {""})),
+            "Restricción": st.column_config.SelectboxColumn(options=[""] + sorted(set(RESTRICCIONES) | set(INF["Restricción"]) - {""})),
+            "Adicional": st.column_config.TextColumn(disabled=True),
+            "N° Informe": st.column_config.NumberColumn(disabled=True),
+            "Fecha Ingreso": fecha_cfg("Fecha Ingreso"), "Fecha Entrega": fecha_cfg("Fecha Entrega"),
+        }, "Maestro de informes actualizado", "inf")
+    with s4:
+        st.caption("Registro de entregas diarias (equivale a «Avance Diario»). Puede ingresar solo el N° de informe: "
+                   "el código se completa automáticamente priorizando el grupo indicado.")
+        _editor(ENT, "ed_ent", {
+            "Fecha": fecha_cfg("Fecha"),
+            "Grupo": st.column_config.SelectboxColumn(options=GRUPOS),
+            "Tipo (GP_AD)": st.column_config.SelectboxColumn(options=sorted(set(TIPOS_GPAD) | set(ENT["Tipo (GP_AD)"]) - {""})),
+            "N° Informe": st.column_config.NumberColumn(step=1),
+        }, "Registro diario actualizado", "ent")
+    with s5:
+        st.caption("Meta diaria de entregas del plan. Use 0 en fines de semana y feriados.")
+        _editor(PLAN, "ed_plan", {"Fecha": fecha_cfg("Fecha"),
+                                  "Meta Diaria": st.column_config.NumberColumn(min_value=0.0, step=1.0, format="%.2f")},
+                "Plan de entrega actualizado", "plan")
+    with s6:
+        st.markdown("Suba el archivo **KPI_ENTREGA_DE_INFORMES.xlsx** en su formato original (hojas *INFORMES G1 G2 G3*, "
+                    "*PENDIENTES G3*, *Plan de entrega* y *Avance Diario*) o la matriz exportada por este tablero. "
+                    "En el formato original, el relleno amarillo indica «Informe Entregado».")
+        carga_matriz("gm")
+    with s7:
+        c1, c2 = st.columns(2)
+        c1.download_button("⬇️ Matriz del tablero (INFORMES · ENTREGAS · PLAN)", excel_canonico(INF, ENT, PLAN, st.session_state.notas),
+                           file_name=f"MATRIZ_KPI_ENTREGA_INFORMES_{HOY:%Y%m%d}.xlsx", use_container_width=True)
+        c2.download_button("⬇️ Formato de seguimiento (G1 G2 G3 · Plan · Avance Diario)",
+                           excel_formato_seguimiento(INF, ENT, PLAN, corte, alcance),
+                           file_name=f"KPI_ENTREGA_DE_INFORMES_{corte:%Y%m%d}.xlsx", use_container_width=True)
+        st.caption("El formato de seguimiento regenera las hojas habituales con valores recalculados (el real del "
+                   "plan corresponde solo al alcance seleccionado). Es un reporte: para volver a subir datos use la "
+                   "matriz del tablero, que conserva el historial completo.")
+
+st.caption("Backlog = informes ingresados a la fecha y no entregados. Cumplimiento del plan = entregas reales del alcance "
+           "desde el inicio del plan ÷ meta acumulada a la fecha de corte. Días hábiles: lunes a viernes sin feriados del Perú.")
